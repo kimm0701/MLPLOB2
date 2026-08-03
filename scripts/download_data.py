@@ -78,18 +78,111 @@ FILE_IDS = {
 MIN_BYTES = 1_000_000     # 이보다 작으면 받다 만 것으로 보고 다시 받는다
 
 
+def is_complete_tar(path: str) -> bool:
+    """받다 만 파일을 완성본으로 착각하지 않도록 검사한다.
+
+    크기만 보면 중간에 끊긴 파일도 통과한다. tar 를 열어 첫 멤버만 읽는 것도
+    부족하다 — 앞부분이 멀쩡하면 잘린 파일도 통과해 버린다.
+    tar 는 512바이트 0 블록 두 개로 끝나므로, 그 종료 표식까지 확인한다.
+    """
+    import tarfile
+
+    if not os.path.exists(path) or os.path.getsize(path) <= MIN_BYTES:
+        return False
+
+    # 1) 끝에 종료 표식(0 으로 채운 1024바이트)이 있는가 -> 잘림 탐지
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(-1024, os.SEEK_END)
+            if fh.read(1024) != b"\0" * 1024:
+                return False
+    except OSError:
+        return False
+
+    # 2) 헤더 체인이 끝까지 이어지는가 -> 내용 손상 탐지
+    try:
+        with tarfile.open(path) as tf:
+            return len(tf.getmembers()) > 0
+    except Exception:                                   # noqa: BLE001
+        return False
+
+
+def deep_verify_tar(path: str) -> tuple[bool, str]:
+    """압축을 실제로 풀어보는 정밀 검사.
+
+    is_complete_tar 는 헤더 체인과 종료 표식만 본다. 그것만으로는 파일 중간이
+    깨진 경우를 못 잡는다 (예: 같은 파일에 두 프로세스가 동시에 쓴 경우).
+    여기서는 안에 든 .gz 를 전부 실제로 풀어보므로 확실하다. 대신 느리다.
+    """
+    import gzip
+    import tarfile
+
+    try:
+        with tarfile.open(path) as tf:
+            members = tf.getmembers()
+            if not members:
+                return False, "빈 아카이브"
+            for mem in members:
+                if not mem.isfile():
+                    continue
+                fh = tf.extractfile(mem)
+                if fh is None:
+                    return False, f"{mem.name}: 읽을 수 없음"
+                with gzip.GzipFile(fileobj=fh) as gz:
+                    while gz.read(1 << 20):
+                        pass
+        return True, f"{len(members)}개 조각 정상"
+    except Exception as exc:                            # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def acquire_lock(out_dir: str):
+    """같은 스크립트를 두 번 띄워 서로의 파일을 덮어쓰는 사고를 막는다."""
+    os.makedirs(out_dir, exist_ok=True)
+    lock_path = os.path.join(out_dir, ".download.lock")
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        try:
+            with open(lock_path) as fh:
+                pid = fh.read().strip()
+        except OSError:
+            pid = "?"
+        print(
+            f"이미 다운로드가 실행 중입니다 (PID {pid}).\n"
+            f"정말 아니라면 잠금 파일을 지우고 다시 실행하세요:\n"
+            f"    rm {lock_path}",
+            file=sys.stderr,
+        )
+        return None
+    os.write(fd, str(os.getpid()).encode())
+    os.close(fd)
+    return lock_path
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="data/raw", help="저장 위치")
     ap.add_argument("--symbols", nargs="*", default=sorted(FILE_IDS))
     ap.add_argument("--dates", nargs="*", default=WEEKDAYS)
+    ap.add_argument(
+        "--verify",
+        action="store_true",
+        help="받지 않고, 이미 있는 파일의 압축을 실제로 풀어 손상 여부만 검사한다",
+    )
+    ap.add_argument(
+        "--delete-corrupt",
+        action="store_true",
+        help="--verify 에서 깨진 파일을 지운다. 이후 다시 실행하면 그것만 새로 받는다",
+    )
     args = ap.parse_args()
 
-    try:
-        import gdown
-    except ImportError:
-        print("gdown 이 없습니다.  pip install gdown", file=sys.stderr)
-        return 1
+    if not args.verify:
+        try:
+            import gdown
+        except ImportError:
+            print("gdown 이 없습니다.  pip install gdown", file=sys.stderr)
+            return 1
 
     jobs = []
     for sym in args.symbols:
@@ -103,38 +196,74 @@ def main() -> int:
                 continue
             jobs.append((sym, date, fid))
 
-    print(f"대상 {len(jobs)}개 파일 -> {args.out}/\n")
-    done = skipped = failed = 0
+    if args.verify:
+        print(f"정밀 검사 {len(jobs)}개 파일 (압축을 실제로 풀어봅니다)\n")
+        bad = missing = 0
+        for i, (sym, date, _) in enumerate(jobs, 1):
+            path = os.path.join(args.out, sym, f"{sym}USDT_{date}.tar")
+            if not os.path.exists(path):
+                print(f"[{i}/{len(jobs)}] 없음   {sym} {date}")
+                missing += 1
+                continue
+            good, detail = deep_verify_tar(path)
+            print(f"[{i}/{len(jobs)}] {'정상' if good else '손상'} {sym} {date}  {detail}",
+                  flush=True)
+            if not good:
+                bad += 1
+                if args.delete_corrupt:
+                    os.remove(path)
+                    print("        지웠습니다. 다시 실행하면 새로 받습니다.")
+        print(f"\n손상 {bad} / 없음 {missing} / 정상 {len(jobs) - bad - missing}")
+        if bad and not args.delete_corrupt:
+            print("--delete-corrupt 를 붙여 다시 실행하면 깨진 파일을 지웁니다.")
+        return 1 if (bad or missing) else 0
 
-    for i, (sym, date, fid) in enumerate(jobs, 1):
-        sym_dir = os.path.join(args.out, sym)
-        os.makedirs(sym_dir, exist_ok=True)
-        path = os.path.join(sym_dir, f"{sym}USDT_{date}.tar")
+    lock_path = acquire_lock(args.out)
+    if lock_path is None:
+        return 1
 
-        if os.path.exists(path) and os.path.getsize(path) > MIN_BYTES:
-            print(f"[{i}/{len(jobs)}] 이미 있음  {sym} {date}"
-                  f"  ({os.path.getsize(path)/1e6:.0f} MB)")
-            skipped += 1
-            continue
+    try:
+        print(f"대상 {len(jobs)}개 파일 -> {args.out}/\n")
+        done = skipped = failed = 0
 
-        print(f"[{i}/{len(jobs)}] 받는 중   {sym} {date} ...", flush=True)
-        try:
-            gdown.download(id=fid, output=path, quiet=True)
-        except Exception as exc:                       # noqa: BLE001
-            print(f"    실패: {exc}", file=sys.stderr)
-            failed += 1
-            continue
+        for i, (sym, date, fid) in enumerate(jobs, 1):
+            sym_dir = os.path.join(args.out, sym)
+            os.makedirs(sym_dir, exist_ok=True)
+            path = os.path.join(sym_dir, f"{sym}USDT_{date}.tar")
 
-        if not os.path.exists(path) or os.path.getsize(path) <= MIN_BYTES:
-            print("    실패: 파일이 비었거나 너무 작습니다", file=sys.stderr)
-            failed += 1
-            continue
-        print(f"    완료 {os.path.getsize(path)/1e6:.0f} MB")
-        done += 1
+            if is_complete_tar(path):
+                print(f"[{i}/{len(jobs)}] 이미 있음  {sym} {date}"
+                      f"  ({os.path.getsize(path)/1e6:.0f} MB)")
+                skipped += 1
+                continue
+
+            if os.path.exists(path):
+                print(f"    받다 만 파일 발견, 지우고 다시 받습니다: {path}")
+                os.remove(path)
+
+            print(f"[{i}/{len(jobs)}] 받는 중   {sym} {date} ...", flush=True)
+            try:
+                gdown.download(id=fid, output=path, quiet=True)
+            except Exception as exc:                       # noqa: BLE001
+                print(f"    실패: {exc}", file=sys.stderr)
+                failed += 1
+                continue
+
+            if not is_complete_tar(path):
+                print("    실패: 파일이 비었거나 온전한 tar 가 아닙니다", file=sys.stderr)
+                failed += 1
+                continue
+            print(f"    완료 {os.path.getsize(path)/1e6:.0f} MB")
+            done += 1
+    finally:
+        if os.path.exists(lock_path):
+            os.remove(lock_path)
 
     total = sum(
         os.path.getsize(os.path.join(dp, f))
-        for dp, _, fs in os.walk(args.out) for f in fs
+        for dp, _, fs in os.walk(args.out)
+        for f in fs
+        if f.endswith(".tar")
     )
     print(f"\n새로 받음 {done} / 이미 있음 {skipped} / 실패 {failed}")
     print(f"총 용량 {total/1e9:.2f} GB")
