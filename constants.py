@@ -1,6 +1,8 @@
 import torch
 from enum import Enum
-from preprocessing.dataset import Dataset  
+# NOTE: `from preprocessing.dataset import Dataset` used to sit here. It was
+# unused and formed a cycle (constants -> preprocessing.dataset -> constants)
+# that also dragged pytorch_lightning into every import of this module.
 
 class DatasetType(Enum):
     LOBSTER = "LOBSTER"
@@ -70,3 +72,24 @@ PROJECT_NAME = "EvolutionData"
 SPLIT_RATES = [0.8, 0.1, 0.1]
 WANDB_API = ""
 WANDB_USERNAME = ""
+
+
+# ----------------------------------------------------------------------------
+# OF / OFI regression spec.  Defined in ofi_spec.py (torch-free so the
+# preprocessing engine and its unit tests import without the DL stack) and
+# re-exported here so `cst.BUCKET_MS` keeps working.
+# ----------------------------------------------------------------------------
+from ofi_spec import (  # noqa: E402,F401
+    BUCKET_MS,
+    LEVELS,
+    SEQ_LEN,
+    DEPTH_ROLLING_WINDOW,
+    OFI_WINDOWS,
+    TARGET_HORIZONS_SEC,
+    TARGET_HORIZON_BUCKETS,
+    INPUT_DIM,
+    OUTPUT_DIM,
+    EPS,
+    LOSS_TYPE,
+    FEATURE_NAMES,
+)

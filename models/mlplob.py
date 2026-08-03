@@ -1,8 +1,18 @@
 from torch import nn
 import torch
 from models.bin import BiN
+import ofi_spec as spec
 
 class MLPLOB(nn.Module):
+    """Bilinear Normalization -> Linear projection -> Feature/Temporal Mixing
+    blocks -> compression -> regression head.
+
+    The mixing blocks, their GELU activations, residual connections and layer
+    norms are unchanged. Only the head is different: the original 3-class
+    up/stationary/down classifier is replaced by `OUTPUT_DIM` regression
+    outputs (signed mid-price returns at each horizon), with **no activation
+    after the final layer** — returns can be positive, zero or negative.
+    """
     def __init__(self, 
                  hidden_dim: int,
                  num_layers: int,
@@ -35,9 +45,13 @@ class MLPLOB(nn.Module):
             self.final_layers.append(nn.Linear(total_dim, total_dim//4))
             self.final_layers.append(nn.GELU())
             total_dim = total_dim//4
-        self.final_layers.append(nn.Linear(total_dim, 3))
+        # regression head. no activation follows - see class docstring.
+        self.final_layers.append(nn.Linear(total_dim, spec.OUTPUT_DIM))
     
     def forward(self, input):
+        # legacy LOBSTER path: splices an order-type embedding into the raw
+        # 40-column LOB layout. OF/OFI inputs are already 22 continuous
+        # features, so this branch is inert for them.
         if self.dataset_type == "LOBSTER":
             continuous_features = torch.cat([input[:, :, :41], input[:, :, 42:]], dim=2)
             order_type = input[:, :, 41].long()

@@ -36,12 +36,12 @@ class BiN(nn.Module):
 
         # if the two scalars are negative then we setting them to 0
         if (self.y1[0] < 0):
-            y1 = torch.cuda.FloatTensor(1, )
+            y1 = torch.empty(1, device=x.device)
             self.y1 = nn.Parameter(y1)
             nn.init.constant_(self.y1, 0.01)
 
         if (self.y2[0] < 0):
-            y2 = torch.cuda.FloatTensor(1, )
+            y2 = torch.empty(1, device=x.device)
             self.y2 = nn.Parameter(y2)
             nn.init.constant_(self.y2, 0.01)
 
@@ -68,6 +68,10 @@ class BiN(nn.Module):
 
         std = torch.std(x, dim=1)
         std = torch.reshape(std, (std.shape[0], std.shape[1], 1))
+        # same guard as the temporal branch above. with OF inputs a bucket that
+        # saw no events is all-zero across every feature, so the feature-axis
+        # std collapses to 0 and z1 would become NaN.
+        std[std < 1e-4] = 1
 
         op1 = x1 @ T1.T
         op1 = torch.permute(op1, (0, 2, 1))
