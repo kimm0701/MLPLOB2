@@ -8,7 +8,14 @@
 
     <cache>/<SYM>/<DATE>_x.npy     [K, 22]  float32   입력 특징
     <cache>/<SYM>/<DATE>_y.npy     [K, 10]  float32   미래 수익률
+    <cache>/<SYM>/<DATE>_px.npy    [K, 3]   float64   mid, 최우선매수, 최우선매도
     <cache>/<SYM>/<DATE>_idx.npy   [N]      int64     학습에 쓸 수 있는 시점
+
+_px 는 학습에 쓰지 않는다. 백테스트에서 "이 예측대로 매매했으면 얼마를 벌었나"
+를 계산하려면 실제 호가가 필요한데, 특징(_x)은 정규화된 주문흐름이라 가격
+정보가 남아 있지 않다. 스프레드 비용도 최우선 매수/매도 차이로 계산한다.
+float64 인 이유는 float32 가 소수 7자리까지만 정확해서, 435.58 같은 가격의
+1틱(0.01) 차이를 다루기에 여유가 부족하기 때문이다.
 
 x/y 는 버킷 전체를 담고, idx 가 그중 쓸 수 있는 시점만 가리킨다. 이렇게 두면
 슬라이딩 윈도우를 만들 때 배열을 복사하지 않아도 되고 (100배 중복 저장 회피),
@@ -42,6 +49,8 @@ def process_day(tar_path: str, out_base: str) -> dict:
     os.makedirs(os.path.dirname(out_base), exist_ok=True)
     np.save(out_base + "_x.npy", res.features.astype(np.float32))
     np.save(out_base + "_y.npy", targets.astype(np.float32))
+    np.save(out_base + "_px.npy",
+            np.stack([res.mid, res.best_bid, res.best_ask], axis=1).astype(np.float64))
     np.save(out_base + "_idx.npy", idx.astype(np.int64))
 
     return dict(
@@ -86,7 +95,11 @@ def main() -> int:
     total_samples = 0
     for i, (sym, date, tar) in enumerate(jobs, 1):
         out_base = os.path.join(args.cache, sym, date)
-        if not args.force and os.path.exists(out_base + "_idx.npy"):
+        # _px 까지 있어야 완료로 본다. 이 파일이 없던 시절에 처리한 날짜는
+        # 다시 돌려서 가격 배열을 채운다.
+        complete = all(os.path.exists(out_base + s)
+                       for s in ("_x.npy", "_y.npy", "_px.npy", "_idx.npy"))
+        if not args.force and complete:
             n = int(np.load(out_base + "_idx.npy").size)
             total_samples += n
             skipped += 1

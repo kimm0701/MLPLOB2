@@ -133,6 +133,8 @@ class OFIResult:
     raw_ofi: np.ndarray          # [K]    §7
     features: np.ndarray         # [K, 22] §10 최종 입력 특징
     mid: np.ndarray              # [K]    §12 미드프라이스
+    best_bid: np.ndarray         # [K]    버킷 종료 시점 최우선 매수호가
+    best_ask: np.ndarray         # [K]    버킷 종료 시점 최우선 매도호가
     mid_valid: np.ndarray        # [K] bool, 양쪽 호가가 모두 존재하는지
     n_events: np.ndarray         # [K] int, 버킷별 실제 이벤트 수 (검증·진단용)
     n_repairs: np.ndarray        # [K] int, 버킷별 장부 정정 횟수 (OF 미반영)
@@ -310,6 +312,8 @@ def build_features(
         raw_ofi=raw_ofi,
         features=features,
         mid=mid,
+        best_bid=best_bid,
+        best_ask=best_ask,
         mid_valid=mid_valid,
         n_events=n_events,
         n_repairs=n_repairs,
