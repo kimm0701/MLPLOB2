@@ -1,6 +1,5 @@
 import torch
 from torch import nn
-import constants as cst
 
 class BiN(nn.Module):
     def __init__(self, d1, t1):
@@ -46,7 +45,10 @@ class BiN(nn.Module):
             nn.init.constant_(self.y2, 0.01)
 
         # normalization along the temporal dimensione
-        T2 = torch.ones([self.t1, 1], device=cst.DEVICE)
+        # follow the input's device/dtype rather than the global cst.DEVICE:
+        # the module has to work on CPU too (tests, ONNX export, inference on a
+        # box without a GPU), and under autocast the dtype has to match as well.
+        T2 = torch.ones([self.t1, 1], device=x.device, dtype=x.dtype)
         x2 = torch.mean(x, dim=2)
         x2 = torch.reshape(x2, (x2.shape[0], x2.shape[1], 1))
         
@@ -62,7 +64,7 @@ class BiN(nn.Module):
         X2 = X2 + (self.B2 @ T2.T)
 
         # normalization along the feature dimension
-        T1 = torch.ones([self.d1, 1], device=cst.DEVICE)
+        T1 = torch.ones([self.d1, 1], device=x.device, dtype=x.dtype)
         x1 = torch.mean(x, dim=1)
         x1 = torch.reshape(x1, (x1.shape[0], x1.shape[1], 1))
 

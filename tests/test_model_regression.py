@@ -125,6 +125,38 @@ def test_no_nan_on_all_zero_bucket_rows():
     assert torch.isfinite(m(x_all_zero)).all()
 
 
+def test_bin_follows_input_device_not_global_constant(monkeypatch):
+    """BiN 이 전역 cst.DEVICE 대신 입력 텐서의 장치를 따라가야 한다.
+
+    예전 구현은 `torch.ones(..., device=cst.DEVICE)` 였다. GPU 머신에서는
+    DEVICE='cuda' 라서 CPU 입력과 섞여 터졌고, CPU 전용 머신에서는 우연히
+    통과해 버렸다. 전역값을 'cuda' 로 바꿔치기하면 두 환경 모두에서 옛 구현이
+    실패하므로 판별력이 있다.
+    """
+    import constants as cst
+
+    monkeypatch.setattr(cst, "DEVICE", "cuda", raising=False)
+
+    m = MLPLOB(HIDDEN, LAYERS, SEQ, FEAT, "OFI")      # CPU 에 만든다
+    out = m(torch.randn(B, SEQ, FEAT))                 # CPU 입력
+
+    assert out.device.type == "cpu"
+    assert torch.isfinite(out).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU 없음")
+def test_runs_on_cuda_end_to_end():
+    m = MLPLOB(HIDDEN, LAYERS, SEQ, FEAT, "OFI").cuda()
+    x = torch.randn(B, SEQ, FEAT, device="cuda")
+    out = m(x)
+    assert out.shape == (B, OUT)
+    assert out.device.type == "cuda"
+
+    loss = nn.MSELoss()(out, torch.randn(B, OUT, device="cuda"))
+    loss.backward()
+    assert np.isfinite(loss.item())
+
+
 def test_forward_backward_smoke_matches_spec_20_9_10():
     """§20-9,10 이 요구한 최소 실행."""
     m = MLPLOB(HIDDEN, LAYERS, SEQ, FEAT, "OFI")
