@@ -134,7 +134,8 @@ class OFIResult:
     features: np.ndarray         # [K, 22] §10 최종 입력 특징
     mid: np.ndarray              # [K]    §12 미드프라이스
     mid_valid: np.ndarray        # [K] bool, 양쪽 호가가 모두 존재하는지
-    n_events: np.ndarray         # [K] int, 버킷별 이벤트 수 (검증·진단용)
+    n_events: np.ndarray         # [K] int, 버킷별 실제 이벤트 수 (검증·진단용)
+    n_repairs: np.ndarray        # [K] int, 버킷별 장부 정정 횟수 (OF 미반영)
     feature_valid: np.ndarray    # [K] bool, §6/§9 warm-up 을 만족하는 버킷
 
     @property
@@ -157,9 +158,15 @@ def build_features(
 
     Parameters
     ----------
-    events : iterable of (ts_ms:int, bid_updates, ask_updates)
+    events : iterable of (ts_ms:int, bid_updates, ask_updates[, is_repair])
         `bid_updates` / `ask_updates` 는 (price, qty) 의 순회 가능 객체.
         qty == 0 은 해당 호가 삭제. 이벤트는 **거래소 순서대로** 들어와야 한다.
+
+        `is_repair=True` 인 이벤트는 호가창 상태만 고치고 **OF 에는 반영되지
+        않는다**. 캡처 유실로 생긴 유령 호가를 bookTicker 기준으로 지우는 등의
+        장부 정정용이다. 실제 주문이 들어오거나 빠진 게 아니므로 주문흐름으로
+        세면 가짜 OF 가 만들어진다. 정정 후 상태가 다음 실제 이벤트의 비교
+        기준이 된다.
     """
     book = OrderBook()
 
@@ -170,12 +177,14 @@ def build_features(
     bid_px_rows: list[float] = []
     ask_px_rows: list[float] = []
     nev_rows: list[int] = []
+    nrep_rows: list[int] = []
 
     first_bucket = None
     cur_k = None
     acc_bid = np.zeros(levels)
     acc_ask = np.zeros(levels)
     n_ev = 0
+    n_rep = 0
     prev_top = None          # 직전 이벤트 적용 후 상태
     last_top = None          # 직전 버킷 최종 상태 (빈 버킷 forward-fill 용)
 
@@ -189,8 +198,11 @@ def build_features(
         bid_px_rows.append(bp[0])
         ask_px_rows.append(ap[0])
         nev_rows.append(n_ev)
+        nrep_rows.append(n_rep)
 
-    for ts_ms, bid_updates, ask_updates in events:
+    for event in events:
+        ts_ms, bid_updates, ask_updates = event[0], event[1], event[2]
+        is_repair = len(event) > 3 and event[3]
         k = ts_ms // bucket_ms          # 반열린 구간. 경계 시각은 다음 버킷 (§3)
 
         if first_bucket is None:
@@ -213,25 +225,31 @@ def build_features(
                 bid_px_rows.append(bp[0])
                 ask_px_rows.append(ap[0])
                 nev_rows.append(0)
+                nrep_rows.append(0)
             cur_k = k
             acc_bid = np.zeros(levels)
             acc_ask = np.zeros(levels)
             n_ev = 0
+            n_rep = 0
 
         book.apply(bid_updates, ask_updates)
         cur_top = book.top(levels)
 
-        if prev_top is None:
+        if is_repair:
+            # 장부 정정. 주문흐름이 아니므로 OF 에 넣지 않는다. 정정 후 상태를
+            # 기준으로 삼아야 다음 실제 이벤트의 OF 가 올바르게 계산된다.
+            n_rep += 1
+        elif prev_top is None:
             # 첫 이벤트에는 비교 대상이 없다. OF 를 0 으로 두고 상태만 잡는다.
             # 이 버킷은 warm-up 구간이라 §11 에서 폐기된다.
-            pass
+            n_ev += 1
         else:
             acc_bid += event_of_bid(prev_top[0], prev_top[1], cur_top[0], cur_top[1])
             acc_ask += event_of_ask(prev_top[2], prev_top[3], cur_top[2], cur_top[3])
+            n_ev += 1
 
         prev_top = cur_top
         last_top = cur_top
-        n_ev += 1
 
     if first_bucket is None:
         raise ValueError("이벤트가 하나도 없다.")
@@ -244,6 +262,7 @@ def build_features(
     best_bid = np.asarray(bid_px_rows)
     best_ask = np.asarray(ask_px_rows)
     n_events = np.asarray(nev_rows, dtype=np.int64)
+    n_repairs = np.asarray(nrep_rows, dtype=np.int64)
     K = bid_of.shape[0]
 
     # ---- §6 OF 정규화: 같은 방향, 같은 단계, 과거 depth_window 버킷 평균잔량 ----
@@ -293,6 +312,7 @@ def build_features(
         mid=mid,
         mid_valid=mid_valid,
         n_events=n_events,
+        n_repairs=n_repairs,
         feature_valid=feature_valid,
     )
 
