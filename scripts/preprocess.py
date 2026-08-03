@@ -37,7 +37,7 @@ import ofi_spec as spec                                        # noqa: E402
 from preprocessing.binance_capture import iter_anchored_events  # noqa: E402
 from preprocessing.ofi_features import build_features           # noqa: E402
 from preprocessing.ofi_labels import build_targets, valid_sample_indices  # noqa: E402
-from scripts.download_data import WEEKDAYS, FILE_IDS            # noqa: E402
+from scripts.download_data import WEEKDAYS, FILE_IDS, acquire_lock  # noqa: E402
 
 
 def process_day(tar_path: str, out_base: str) -> dict:
@@ -47,11 +47,24 @@ def process_day(tar_path: str, out_base: str) -> dict:
     idx = valid_sample_indices(res.feature_valid, target_valid, spec.SEQ_LEN)
 
     os.makedirs(os.path.dirname(out_base), exist_ok=True)
-    np.save(out_base + "_x.npy", res.features.astype(np.float32))
-    np.save(out_base + "_y.npy", targets.astype(np.float32))
-    np.save(out_base + "_px.npy",
-            np.stack([res.mid, res.best_bid, res.best_ask], axis=1).astype(np.float64))
-    np.save(out_base + "_idx.npy", idx.astype(np.int64))
+
+    # 임시 이름으로 쓴 뒤 한꺼번에 이름을 바꾼다. 중간에 끊기면 최종 파일이
+    # 아예 생기지 않으므로, 반쯤 쓰인 배열을 완성본으로 착각할 일이 없다.
+    payload = {
+        "_x.npy": res.features.astype(np.float32),
+        "_y.npy": targets.astype(np.float32),
+        "_px.npy": np.stack([res.mid, res.best_bid, res.best_ask], axis=1).astype(np.float64),
+        "_idx.npy": idx.astype(np.int64),
+    }
+    staged = []
+    for suffix, arr in payload.items():
+        # np.save 는 .npy 로 끝나지 않으면 확장자를 덧붙인다. 임시 이름도
+        # .npy 로 끝내서 실제 저장 경로가 예상과 어긋나지 않게 한다.
+        tmp = f"{out_base}{suffix[:-4]}.{os.getpid()}.tmp.npy"
+        np.save(tmp, arr, allow_pickle=False)
+        staged.append((tmp, out_base + suffix))
+    for tmp, final in staged:
+        os.replace(tmp, final)
 
     return dict(
         buckets=res.n_buckets,
@@ -86,10 +99,16 @@ def main() -> int:
         print("처리할 파일이 없습니다.", file=sys.stderr)
         return 1
 
-    print(f"대상 {len(jobs)}개 (종목 {len(args.symbols)} x 날짜 {len(args.dates)})\n")
+    # 두 번 띄우면 같은 .npy 를 동시에 써서 결과가 깨진다. 실제로 겪었다.
+    lock_path = acquire_lock(args.cache)
+    if lock_path is None:
+        return 1
+
+    print(f"대상 {len(jobs)}개 (종목 {len(args.symbols)} x 날짜 {len(args.dates)})\n",
+          flush=True)
     print(f"{'':>5}{'종목':<6}{'날짜':<10}{'버킷':>10}{'학습샘플':>11}"
           f"{'이벤트있음':>10}{'2건이상':>9}{'소요':>8}")
-    print("-" * 72)
+    print("-" * 72, flush=True)
 
     done = skipped = 0
     total_samples = 0
@@ -119,8 +138,12 @@ def main() -> int:
               f"{100*st['filled']:>9.1f}%{100*st['multi']:>8.1f}%{st['secs']:>7.0f}초",
               flush=True)
 
+    if os.path.exists(lock_path):
+        os.remove(lock_path)
+
     print(f"\n새로 처리 {done} / 이미 있음 {skipped}")
     print(f"학습에 쓸 수 있는 샘플 총 {total_samples:,}개")
+    print("\n다음: python scripts/fit_normalizer.py")
     return 0
 
 
