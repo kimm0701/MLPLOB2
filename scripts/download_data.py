@@ -15,6 +15,7 @@
 import argparse
 import os
 import sys
+import time
 
 # 2026-07-14 ~ 2026-07-31 중 평일 14일. 주말은 미국 본장이 닫혀 있어 제외한다.
 WEEKDAYS = [
@@ -175,6 +176,12 @@ def main() -> int:
         action="store_true",
         help="--verify 에서 깨진 파일을 지운다. 이후 다시 실행하면 그것만 새로 받는다",
     )
+    ap.add_argument("--retries", type=int, default=4,
+                    help="파일당 재시도 횟수 (기본 4)")
+    ap.add_argument("--backoff", type=float, default=30.0,
+                    help="첫 재시도 전 대기 초. 실패할수록 2배씩 늘어난다 (기본 30)")
+    ap.add_argument("--delay", type=float, default=3.0,
+                    help="파일 사이 대기 초. 드라이브 속도 제한 회피용 (기본 3)")
     args = ap.parse_args()
 
     if not args.verify:
@@ -242,19 +249,38 @@ def main() -> int:
                 os.remove(path)
 
             print(f"[{i}/{len(jobs)}] 받는 중   {sym} {date} ...", flush=True)
-            try:
-                gdown.download(id=fid, output=path, quiet=True)
-            except Exception as exc:                       # noqa: BLE001
-                print(f"    실패: {exc}", file=sys.stderr)
+
+            # 구글 드라이브는 짧은 시간에 여러 파일을 받으면 일시적으로 막는다.
+            # 권한 문제가 아니라 속도 제한이므로, 간격을 늘려가며 다시 시도한다.
+            ok = False
+            for attempt in range(1, args.retries + 1):
+                try:
+                    gdown.download(id=fid, output=path, quiet=True)
+                except Exception as exc:                   # noqa: BLE001
+                    print(f"    시도 {attempt}/{args.retries} 실패: {exc}",
+                          file=sys.stderr, flush=True)
+                else:
+                    if is_complete_tar(path):
+                        ok = True
+                        break
+                    print(f"    시도 {attempt}/{args.retries} 실패: "
+                          "받다 만 파일", file=sys.stderr, flush=True)
+
+                if os.path.exists(path):
+                    os.remove(path)
+                if attempt < args.retries:
+                    wait = args.backoff * (2 ** (attempt - 1))
+                    print(f"    {wait:.0f}초 쉬었다가 다시 시도합니다", flush=True)
+                    time.sleep(wait)
+
+            if not ok:
+                print(f"    포기: {sym} {date}", file=sys.stderr, flush=True)
                 failed += 1
                 continue
 
-            if not is_complete_tar(path):
-                print("    실패: 파일이 비었거나 온전한 tar 가 아닙니다", file=sys.stderr)
-                failed += 1
-                continue
             print(f"    완료 {os.path.getsize(path)/1e6:.0f} MB")
             done += 1
+            time.sleep(args.delay)      # 다음 파일 전 잠깐 쉬어 제한을 피한다
     finally:
         if os.path.exists(lock_path):
             os.remove(lock_path)
