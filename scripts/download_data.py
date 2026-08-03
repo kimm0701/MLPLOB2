@@ -137,28 +137,60 @@ def deep_verify_tar(path: str) -> tuple[bool, str]:
         return False, f"{type(exc).__name__}: {exc}"
 
 
+def _pid_alive(pid: int) -> bool:
+    """그 PID 가 아직 살아 있는가."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)            # 신호 0 은 존재 확인만 한다
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True                # 남의 프로세스지만 살아 있다
+    except OSError:
+        return False
+    return True
+
+
 def acquire_lock(out_dir: str):
-    """같은 스크립트를 두 번 띄워 서로의 파일을 덮어쓰는 사고를 막는다."""
+    """같은 스크립트를 두 번 띄워 서로의 파일을 덮어쓰는 사고를 막는다.
+
+    강제 종료되면 잠금 파일이 남는다. 그 상태로 다음 실행이 영영 막히면
+    자리를 비운 사이 아무것도 진행되지 않으므로, 기록된 PID 가 죽어 있으면
+    남은 잠금으로 보고 넘겨받는다.
+    """
     os.makedirs(out_dir, exist_ok=True)
     lock_path = os.path.join(out_dir, ".download.lock")
-    try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
+
+    for _ in range(2):
         try:
-            with open(lock_path) as fh:
-                pid = fh.read().strip()
-        except OSError:
-            pid = "?"
-        print(
-            f"이미 다운로드가 실행 중입니다 (PID {pid}).\n"
-            f"정말 아니라면 잠금 파일을 지우고 다시 실행하세요:\n"
-            f"    rm {lock_path}",
-            file=sys.stderr,
-        )
-        return None
-    os.write(fd, str(os.getpid()).encode())
-    os.close(fd)
-    return lock_path
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                with open(lock_path) as fh:
+                    pid = int(fh.read().strip() or 0)
+            except (OSError, ValueError):
+                pid = 0
+
+            if _pid_alive(pid):
+                print(f"이미 실행 중입니다 (PID {pid}). 두 개가 같은 파일을 "
+                      f"건드리지 않도록 이번 실행은 멈춥니다.", file=sys.stderr)
+                return None
+
+            print(f"죽은 프로세스(PID {pid}) 의 잠금이 남아 있어 정리합니다.",
+                  file=sys.stderr)
+            try:
+                os.remove(lock_path)
+            except OSError:
+                pass
+            continue                       # 지웠으니 한 번 더 시도
+        else:
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return lock_path
+
+    print(f"잠금을 얻지 못했습니다: {lock_path}", file=sys.stderr)
+    return None
 
 
 def main() -> int:
