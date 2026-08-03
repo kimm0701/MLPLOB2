@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 import numpy as np
@@ -27,13 +28,17 @@ class OFIWindowDataset(Dataset):
     """하나의 (종목, 날짜) 에 대한 슬라이딩 윈도우 Dataset."""
 
     def __init__(self, features, targets, indices, seq_len: int = spec.SEQ_LEN,
-                 symbol: str = "", date: str = ""):
+                 symbol: str = "", date: str = "", center=None, scale=None):
         self.features = features          # [K, 22]
         self.targets = targets            # [K, 10]
         self.indices = np.asarray(indices, dtype=np.int64)
         self.seq_len = seq_len
         self.symbol = symbol
         self.date = date
+        # 종목별 사전 정규화. 저장된 배열은 건드리지 않고 읽을 때만 적용해서,
+        # 껐다 켠 비교와 종목 추가가 재전처리 없이 가능하게 한다.
+        self.center = None if center is None else np.asarray(center, np.float32)
+        self.scale = None if scale is None else np.asarray(scale, np.float32)
 
         if self.indices.size:
             assert self.indices.min() - seq_len + 1 >= 0, "입력 구간이 배열 앞을 벗어난다"
@@ -48,11 +53,29 @@ class OFIWindowDataset(Dataset):
         # torch.from_numpy 가 경고를 내고, 이후 어떤 in-place 연산도 위험해진다.
         x = np.array(self.features[k - self.seq_len + 1: k + 1], dtype=np.float32)
         y = np.array(self.targets[k], dtype=np.float32)
+        if self.center is not None:
+            x -= self.center
+            x /= self.scale
         return torch.from_numpy(x), torch.from_numpy(y)
 
 
+def load_normalizer(cache_dir: str, path: str | None = None) -> dict:
+    """scripts/fit_normalizer.py 가 저장한 종목별 기준값. 없으면 빈 dict."""
+    path = path or os.path.join(cache_dir, "normalizer.json")
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        payload = json.load(fh)
+    if payload.get("feature_names") != list(spec.FEATURE_NAMES):
+        raise ValueError(
+            f"{path} 의 특징 순서가 현재 사양과 다릅니다. "
+            "fit_normalizer.py 를 다시 실행하세요."
+        )
+    return payload.get("symbols", {})
+
+
 def load_day(cache_dir: str, symbol: str, date: str, seq_len: int = spec.SEQ_LEN,
-             mmap: bool = True) -> OFIWindowDataset | None:
+             mmap: bool = True, norm: dict | None = None) -> OFIWindowDataset | None:
     """전처리해 둔 하루치를 읽어 Dataset 으로 만든다. 없으면 None."""
     base = os.path.join(cache_dir, symbol, date)
     fx, fy, fi = base + "_x.npy", base + "_y.npy", base + "_idx.npy"
@@ -65,16 +88,40 @@ def load_day(cache_dir: str, symbol: str, date: str, seq_len: int = spec.SEQ_LEN
     idx = np.load(fi)
     if idx.size == 0:
         return None
-    return OFIWindowDataset(x, y, idx, seq_len, symbol, date)
+
+    center = scale = None
+    if norm:
+        st = norm.get(symbol)
+        if st is None:
+            raise KeyError(
+                f"{symbol} 의 정규화 기준값이 없습니다. "
+                f"scripts/fit_normalizer.py --symbols {symbol} 를 실행하세요."
+            )
+        center, scale = st["center"], st["scale"]
+
+    return OFIWindowDataset(x, y, idx, seq_len, symbol, date, center, scale)
 
 
 def build_split(cache_dir: str, symbols, dates, seq_len: int = spec.SEQ_LEN,
-                mmap: bool = True) -> ConcatDataset:
-    """여러 종목 x 여러 날짜를 하나의 Dataset 으로 잇는다."""
+                mmap: bool = True, normalize: bool = True,
+                normalizer_path: str | None = None) -> ConcatDataset:
+    """여러 종목 x 여러 날짜를 하나의 Dataset 으로 잇는다.
+
+    normalize=True 면 종목별 사전 정규화를 적용한다. 깊이 정규화만으로는
+    종목 간 스케일이 최대 68배까지 벌어져서, 그대로 합치면 모델이 흐름 패턴
+    대신 종목 정체성을 학습한다.
+    """
+    norm = load_normalizer(cache_dir, normalizer_path) if normalize else {}
+    if normalize and not norm:
+        raise FileNotFoundError(
+            f"{cache_dir}/normalizer.json 이 없습니다.\n"
+            "scripts/fit_normalizer.py 를 먼저 실행하거나 normalize=False 로 끄세요."
+        )
+
     parts = []
     for sym in symbols:
         for date in dates:
-            ds = load_day(cache_dir, sym, date, seq_len, mmap)
+            ds = load_day(cache_dir, sym, date, seq_len, mmap, norm)
             if ds is not None:
                 parts.append(ds)
     if not parts:
@@ -104,8 +151,13 @@ def split_dates(dates, n_val: int = 2, n_test: int = 2):
     구간 사이 침범이 원천적으로 없다. 최종시험은 **가장 최근** 날짜를 쓴다.
     """
     dates = sorted(dates)
+    assert n_val >= 0 and n_test >= 0, (n_val, n_test)
     assert len(dates) > n_val + n_test, f"날짜가 너무 적다: {len(dates)}"
-    test = dates[-n_test:]
-    val = dates[-(n_val + n_test):-n_test]
-    train = dates[:-(n_val + n_test)]
+
+    # 음수 인덱스 슬라이싱은 0 에서 뒤집힌다. dates[-0:] 은 빈 목록이 아니라
+    # 전체 목록이라, n_test=0 이면 시험 구간이 전부가 되어 버린다.
+    n = len(dates)
+    train = dates[: n - n_val - n_test]
+    val = dates[n - n_val - n_test: n - n_test]
+    test = dates[n - n_test:] if n_test else []
     return train, val, test

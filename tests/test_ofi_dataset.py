@@ -82,7 +82,8 @@ def test_concat_never_mixes_symbols_or_days(tmp_path):
             np.save(base + "_y.npy", np.full((K, OUT), 2.0, np.float32))
             np.save(base + "_idx.npy", np.arange(SEQ - 1, K - 200, dtype=np.int64))
 
-    ds = build_split(str(tmp_path), ["AAA", "BBB"], ["20260101", "20260102"])
+    ds = build_split(str(tmp_path), ["AAA", "BBB"], ["20260101", "20260102"],
+                     normalize=False)
     assert len(ds.datasets) == 4, "(종목, 날짜) 조합마다 독립된 Dataset"
     # 각 조각이 자기 배열만 보므로 창이 조합 경계를 넘는 것이 구조적으로 불가능
     for part in ds.datasets:
@@ -92,7 +93,89 @@ def test_concat_never_mixes_symbols_or_days(tmp_path):
 
 def test_missing_cache_raises_with_a_useful_message(tmp_path):
     with pytest.raises(FileNotFoundError, match="preprocess"):
-        build_split(str(tmp_path), ["NOPE"], ["20260101"])
+        build_split(str(tmp_path), ["NOPE"], ["20260101"], normalize=False)
+
+
+# ---------------------------------------------------------------------------
+# 종목별 사전 정규화 (§17)
+# ---------------------------------------------------------------------------
+def _write_day(root, sym, date, fill, K=800):
+    d = root / sym
+    d.mkdir(exist_ok=True)
+    base = str(d / date)
+    np.save(base + "_x.npy", np.full((K, FEAT), fill, np.float32))
+    np.save(base + "_y.npy", np.full((K, OUT), 0.001, np.float32))
+    np.save(base + "_idx.npy", np.arange(SEQ - 1, K - 200, dtype=np.int64))
+    return base
+
+
+def _write_normalizer(root, table):
+    import json
+    payload = {
+        "feature_names": list(spec.FEATURE_NAMES),
+        "method": "median_iqr",
+        "symbols": {s: {"center": [c] * FEAT, "scale": [sc] * FEAT}
+                    for s, (c, sc) in table.items()},
+    }
+    (root / "normalizer.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_per_symbol_normalisation_puts_symbols_on_one_scale(tmp_path):
+    """스케일이 10배 다른 두 종목이 정규화 후 같은 값이 되어야 한다."""
+    _write_day(tmp_path, "BIG", "20260101", fill=100.0)
+    _write_day(tmp_path, "SML", "20260101", fill=10.0)
+    _write_normalizer(tmp_path, {"BIG": (100.0, 20.0), "SML": (10.0, 2.0)})
+
+    ds = build_split(str(tmp_path), ["BIG", "SML"], ["20260101"])
+    by_sym = {p.symbol: p for p in ds.datasets}
+
+    xb, _ = by_sym["BIG"][0]
+    xs, _ = by_sym["SML"][0]
+    assert torch.allclose(xb, torch.zeros_like(xb)), "(100-100)/20 = 0"
+    assert torch.allclose(xs, torch.zeros_like(xs)), "(10-10)/2 = 0"
+    assert torch.allclose(xb, xs), "정규화 후 두 종목이 같은 스케일"
+
+
+def test_normalisation_formula(tmp_path):
+    _write_day(tmp_path, "AAA", "20260101", fill=7.0)
+    _write_normalizer(tmp_path, {"AAA": (3.0, 2.0)})
+    ds = build_split(str(tmp_path), ["AAA"], ["20260101"])
+    x, _ = ds[0]
+    assert torch.allclose(x, torch.full_like(x, 2.0)), "(7-3)/2 = 2"
+
+
+def test_normalisation_can_be_turned_off_for_comparison(tmp_path):
+    _write_day(tmp_path, "AAA", "20260101", fill=7.0)
+    _write_normalizer(tmp_path, {"AAA": (3.0, 2.0)})
+    ds = build_split(str(tmp_path), ["AAA"], ["20260101"], normalize=False)
+    x, _ = ds[0]
+    assert torch.allclose(x, torch.full_like(x, 7.0)), "끄면 원본 그대로"
+
+
+def test_unknown_symbol_in_normalizer_is_an_error(tmp_path):
+    """기준값이 없는 종목을 조용히 정규화 없이 섞으면 안 된다."""
+    _write_day(tmp_path, "AAA", "20260101", fill=7.0)
+    _write_day(tmp_path, "NEW", "20260101", fill=7.0)
+    _write_normalizer(tmp_path, {"AAA": (3.0, 2.0)})
+    with pytest.raises(KeyError, match="fit_normalizer"):
+        build_split(str(tmp_path), ["AAA", "NEW"], ["20260101"])
+
+
+def test_feature_order_change_invalidates_the_normalizer(tmp_path):
+    import json
+    _write_day(tmp_path, "AAA", "20260101", fill=7.0)
+    payload = {"feature_names": ["뒤바뀐", "순서"], "symbols": {}}
+    (tmp_path / "normalizer.json").write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="특징 순서"):
+        build_split(str(tmp_path), ["AAA"], ["20260101"])
+
+
+def test_normalizer_is_fitted_on_training_dates_only():
+    """검증·시험 날짜가 기준값 계산에 들어가면 미래를 미리 본 것이 된다."""
+    dates = [f"202607{d:02d}" for d in range(14, 28)]
+    train, val, test = split_dates(dates, n_val=2, n_test=2)
+    assert set(train).isdisjoint(val) and set(train).isdisjoint(test)
+    assert max(train) < min(val)
 
 
 # ---------------------------------------------------------------------------
@@ -107,3 +190,13 @@ def test_split_dates_is_chronological_and_test_is_most_recent():
     assert te == dates[-2:], "최종시험은 가장 최근 날짜"
     assert set(tr) | set(va) | set(te) == set(dates)
     assert not (set(tr) & set(va)) and not (set(va) & set(te))
+
+
+@pytest.mark.parametrize("n_val,n_test", [(0, 0), (0, 2), (2, 0), (2, 2)])
+def test_split_dates_handles_zero_counts(n_val, n_test):
+    """dates[-0:] 는 빈 목록이 아니라 전체다. 0 을 넣어도 어긋나면 안 된다."""
+    dates = [f"202607{d:02d}" for d in range(14, 28)]
+    tr, va, te = split_dates(dates, n_val=n_val, n_test=n_test)
+    assert len(va) == n_val and len(te) == n_test
+    assert len(tr) == len(dates) - n_val - n_test
+    assert tr + va + te == dates, "합치면 원래 순서 그대로여야 한다"
