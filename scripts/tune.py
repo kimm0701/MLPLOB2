@@ -74,6 +74,40 @@ def thin(ds, stride):
     return ds
 
 
+# 실측 기준값. hidden_dim 40 / batch 1024 로 2,428 배치를 404초에 처리했고
+# (초당 6,158 샘플), 검증은 배치당 약 4배 빨랐다. 탐색 범위 중앙인 hidden 128
+# 은 파라미터가 2.8배라 보수적으로 3배 느리다고 본다.
+TRAIN_SAMPLES_PER_SEC = 2_000
+VAL_SAMPLES_PER_SEC = 8_000
+
+
+def _print_budget(args, n_train, n_val):
+    """돌리기 전에 예상 시간을 보여준다.
+
+    한 번 학습이 얼마나 걸리는지 모르고 시작하면, 탐색이 하루를 넘겨도 중간에
+    알 수가 없다. 배치 개수가 아니라 **샘플 수**로 환산한다 — 배치 크기를
+    바꾸면 배치당 시간도 같이 변해서 배치 수로는 비교가 안 된다.
+    """
+    train_n = n_train * args.limit_train_batches
+    val_n = n_val * args.limit_val_batches
+    per_epoch = train_n / TRAIN_SAMPLES_PER_SEC + val_n / VAL_SAMPLES_PER_SEC
+    per_trial = per_epoch * args.max_epochs
+    # 가지치기로 상당수가 조기 종료되므로 전체는 단순 곱보다 짧다
+    total_hi = per_trial * args.trials
+    total_lo = total_hi * 0.45
+
+    print()
+    print(f"예상 소요  1 epoch 약 {per_epoch/60:.0f}분  "
+          f"(학습 {train_n/TRAIN_SAMPLES_PER_SEC/60:.0f}분 + "
+          f"검증 {val_n/VAL_SAMPLES_PER_SEC/60:.0f}분)")
+    print(f"           1 시도 {per_trial/60:.0f}분,  "
+          f"{args.trials}회 전체 {total_lo/3600:.1f} ~ {total_hi/3600:.1f}시간")
+    if total_hi / 3600 > 8:
+        print("           ! 길다. --train-days 를 줄이거나 --stride 를 키우거나 "
+              "--limit-val-batches 를 낮추세요.")
+    print()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache", default="data/processed")
@@ -81,15 +115,15 @@ def main() -> int:
     ap.add_argument("--dates", nargs="*", default=WEEKDAYS)
     ap.add_argument("--n-val", type=int, default=2)
     ap.add_argument("--n-test", type=int, default=2)
-    ap.add_argument("--trials", type=int, default=25)
-    ap.add_argument("--max-epochs", type=int, default=4)
-    ap.add_argument("--stride", type=int, default=10,
+    ap.add_argument("--trials", type=int, default=20)
+    ap.add_argument("--max-epochs", type=int, default=3)
+    ap.add_argument("--stride", type=int, default=30,
                     help="탐색 중에는 더 성글게 뽑아 한 시도를 빨리 끝낸다")
-    ap.add_argument("--train-days", type=int, default=0,
+    ap.add_argument("--train-days", type=int, default=4,
                     help="0 이면 학습 날짜 전부. 줄이면 한 시도가 빨라진다")
     ap.add_argument("--limit-train-batches", type=float, default=1.0,
                     help="한 시도의 학습 분량. 0.3 이면 30%만 돌린다")
-    ap.add_argument("--limit-val-batches", type=float, default=0.25,
+    ap.add_argument("--limit-val-batches", type=float, default=0.1,
                     help="한 시도의 검증 분량. 탐색 중에는 일부만 봐도 순위가 갈린다")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--study", default="mlplob_ofi")
