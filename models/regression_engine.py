@@ -11,12 +11,21 @@ argmax, softmax, 정확도·F1, 그리고 입력의 0/2번 칸을 가격으로 �
 정규화된 주문흐름이다. 그대로 두면 흐름 값을 가격으로 착각한다. 가격은
 전처리 때 저장해 둔 _px.npy 에서 백테스트가 따로 읽는다.
 
-손실 스케일
------------
-수익률은 1e-4 규모라 MSE 가 1e-8 규모가 된다. Adam 의 기본 eps 가 1e-8 이라
-분모에서 기울기와 같은 크기가 되어 갱신이 눌린다. 그래서 손실만 bp 단위
-(x 1e4) 로 재서 O(1) 로 만든다. 상수배이므로 최적해는 그대로이고, 로그에
-찍히는 숫자도 읽을 수 있게 된다. 성적 지표는 원래 소수 단위로 되돌려 계산한다.
+출력 단위
+---------
+모델은 **bp(0.01%) 단위로 예측한다**. 정답만 1e4 를 곱해 올리고 예측은 그대로
+쓴다.
+
+처음에는 예측과 정답에 둘 다 1e4 를 곱했는데, 그건 손실 숫자만 키울 뿐
+모델이 실제로 내놓아야 할 값은 여전히 0.0002 같은 극소값으로 남긴다. 신경망은
+초기화 직후 0.1~1 규모를 출력하므로 3~4자릿수를 줄이는 데 학습을 다 쓴다.
+실측으로 첫 epoch 손실이 3467 bp^2 (RMSE 59bp) 에서 시작했다 — 정답 크기
+2bp 의 30배다. 2 epoch 을 돌고도 5.5bp 로, 아직 "평균값 답하기" 수준에도
+도달하지 못했고 IC 는 0 이었다.
+
+정답만 올리면 초기 출력(약 1)과 정답(약 2bp)의 크기가 맞아 곧바로 학습이
+시작된다. 성적 지표와 백테스트는 예측을 다시 1e4 로 나눠 소수 수익률로
+되돌려 쓴다 (사양 §13 의 저장 형식은 소수 그대로다).
 """
 
 from __future__ import annotations
@@ -32,7 +41,7 @@ from utils.lightning_compat import LightningModule
 import ofi_spec as spec
 from utils.metrics import format_table, summarise
 
-LOSS_SCALE = 1e4          # 소수 수익률 -> bp. 손실을 O(1) 로 만들기 위한 상수배
+TARGET_SCALE = 1e4        # 소수 수익률 -> bp. 모델은 bp 로 예측한다
 
 
 def load_model_from_checkpoint(path: str, map_location="cpu"):
@@ -119,9 +128,9 @@ class RegressionEngine(LightningModule):
     def forward(self, x):
         return self.model(x)
 
-    def loss(self, pred, target):
-        """bp 단위로 재서 계산. 상수배라 최적해는 같다."""
-        return self.criterion(pred * LOSS_SCALE, target * LOSS_SCALE)
+    def loss(self, pred_bp, target):
+        """모델 출력은 bp, 정답은 소수. 정답만 올려서 맞춘다."""
+        return self.criterion(pred_bp, target * TARGET_SCALE)
 
     # ------------------------------------------------------------------
     def training_step(self, batch, batch_idx):
@@ -143,7 +152,8 @@ class RegressionEngine(LightningModule):
         pred = self(x)
         loss = self.loss(pred, y)
         buf = self._buffers.setdefault(dataloader_idx, {"p": [], "t": [], "l": []})
-        buf["p"].append(pred.detach().float().cpu())
+        # 지표와 백테스트는 사양대로 소수 수익률을 쓴다
+        buf["p"].append(pred.detach().float().cpu() / TARGET_SCALE)
         buf["t"].append(y.detach().float().cpu())
         buf["l"].append(loss.detach())
         return loss

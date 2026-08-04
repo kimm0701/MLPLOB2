@@ -31,7 +31,10 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import ofi_spec as spec                                        # noqa: E402
-from models.regression_engine import load_model_from_checkpoint  # noqa: E402
+from models.regression_engine import (                          # noqa: E402
+    TARGET_SCALE,
+    load_model_from_checkpoint,
+)
 from preprocessing.ofi_dataset import load_normalizer, split_dates  # noqa: E402
 from scripts.download_data import FILE_IDS, WEEKDAYS           # noqa: E402
 
@@ -62,7 +65,8 @@ def predict_day(model, cache, symbol, date, norm, device, batch_size=4096):
         if center is not None:
             win = (win - center) / scale
         out = model(torch.from_numpy(win).to(device))
-        preds[s:s + len(ks)] = out.float().cpu().numpy()
+        # 모델은 bp 로 예측한다. 가격 계산은 소수 수익률로 한다.
+        preds[s:s + len(ks)] = out.float().cpu().numpy() / TARGET_SCALE
     return idx, preds, np.asarray(px)
 
 
