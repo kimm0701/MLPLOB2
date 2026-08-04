@@ -87,6 +87,10 @@ def main() -> int:
                     help="탐색 중에는 더 성글게 뽑아 한 시도를 빨리 끝낸다")
     ap.add_argument("--train-days", type=int, default=0,
                     help="0 이면 학습 날짜 전부. 줄이면 한 시도가 빨라진다")
+    ap.add_argument("--limit-train-batches", type=float, default=1.0,
+                    help="한 시도의 학습 분량. 0.3 이면 30%만 돌린다")
+    ap.add_argument("--limit-val-batches", type=float, default=0.25,
+                    help="한 시도의 검증 분량. 탐색 중에는 일부만 봐도 순위가 갈린다")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--study", default="mlplob_ofi")
     ap.add_argument("--storage", default=None,
@@ -124,7 +128,7 @@ def main() -> int:
                    num_features=spec.INPUT_DIM, dataset_type="OFI")
         engine = RegressionEngine(model=MLPLOB(**cfg), lr=lr, loss_type=loss,
                                   weight_decay=wd, eval_names=["all"],
-                                  model_config=cfg)
+                                  model_config=cfg, pooled_name=None)
 
         trainer = Trainer(
             accelerator="gpu" if torch.cuda.is_available() else "cpu",
@@ -132,6 +136,8 @@ def main() -> int:
             callbacks=[PruningCallback(trial),
                        EarlyStopping(monitor="val_loss", mode="min", patience=1)],
             num_sanity_val_steps=0,
+            limit_train_batches=args.limit_train_batches,
+            limit_val_batches=args.limit_val_batches,
             logger=False,
             enable_checkpointing=False,
             enable_progress_bar=False,

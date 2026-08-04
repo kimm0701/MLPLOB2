@@ -100,6 +100,7 @@ class RegressionEngine(LightningModule):
         ckpt_dir: str | None = None,
         horizons=tuple(spec.TARGET_HORIZONS_SEC),
         model_config: dict | None = None,
+        pooled_name: str | None = "all",
     ):
         super().__init__()
         self.model = model
@@ -112,6 +113,8 @@ class RegressionEngine(LightningModule):
         self.loss_type = loss_type
         self.weight_decay = weight_decay
         self.eval_names = list(eval_names or ["all"])
+        # 종목별 결과를 이어붙여 만들 합산 항목의 이름. None 이면 안 만든다.
+        self.pooled_name = pooled_name
         self.ckpt_dir = ckpt_dir
         self.horizons = list(horizons)
 
@@ -120,6 +123,7 @@ class RegressionEngine(LightningModule):
 
         self._train_losses: list[float] = []
         self._buffers: dict[int, dict[str, list]] = {}
+        self._raw: dict[str, dict] = {}
         self.best_val = float("inf")
         self.best_ckpt_path: str | None = None
         self.last_report: dict[str, dict] = {}
@@ -180,6 +184,7 @@ class RegressionEngine(LightningModule):
             s = summarise(pred, target, self.horizons)
             s["loss"] = mean_loss
             report[name] = s
+            self._raw[name] = {"pred": pred, "target": target}
 
             self.log(f"{stage}_loss/{name}", mean_loss, add_dataloader_idx=False)
             self.log(f"{stage}_ic/{name}", float(np.nanmean(s["ic"])),
@@ -187,15 +192,28 @@ class RegressionEngine(LightningModule):
             self.log(f"{stage}_dir/{name}", float(np.nanmean(s["dir_acc"])),
                      add_dataloader_idx=False)
 
-        # 조기 종료와 체크포인트는 첫 dataloader(합산 검증셋) 기준
-        primary = report[self.eval_names[0]] if self.eval_names[0] in report \
-            else report[next(iter(report))]
+        # 합산 성적은 종목별 결과를 이어붙여 계산한다. 합산용 dataloader 를
+        # 따로 두면 같은 데이터를 두 번 훑어 검증 시간이 두 배가 된다.
+        if len(report) > 1 and self.pooled_name:
+            all_pred = np.concatenate([b["pred"] for b in self._raw.values()])
+            all_target = np.concatenate([b["target"] for b in self._raw.values()])
+            s = summarise(all_pred, all_target, self.horizons)
+            s["loss"] = float(np.mean([r["loss"] for r in report.values()]))
+            report = {self.pooled_name: s, **report}
+            self.log(f"{stage}_loss/{self.pooled_name}", s["loss"],
+                     add_dataloader_idx=False)
+            self.log(f"{stage}_ic/{self.pooled_name}",
+                     float(np.nanmean(s["ic"])), add_dataloader_idx=False)
+
+        # 조기 종료와 체크포인트는 합산 성적 기준
+        primary = report[next(iter(report))]
         self.log(f"{stage}_loss", primary["loss"], prog_bar=True,
                  add_dataloader_idx=False)
 
         self._print_report(stage, report)
         self.last_report = report
         self._buffers.clear()
+        self._raw.clear()
 
         if stage == "val" and primary["loss"] < self.best_val:
             self.best_val = primary["loss"]

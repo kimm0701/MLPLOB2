@@ -126,23 +126,18 @@ def main() -> int:
     print(f"학습셋   {describe(train_ds)}   (간격 {args.stride})")
     print(f"검증셋   {describe(val_all)}\n")
 
-    # 검증 dataloader: [합산, 종목1, 종목2, ...] 순서. 첫 번째가 조기종료 기준.
-    val_names = ["all"] + train_syms
-    val_loaders = [make_loader(val_all, args.batch_size, False, args.workers)]
-    for sym in train_syms:
-        val_loaders.append(make_loader(
-            build_split(args.cache, [sym], val_dates, **kw),
-            args.batch_size, False, args.workers))
+    # 종목별 dataloader 만 둔다. 합산 성적은 엔진이 이어붙여 계산하므로
+    # 합산용 loader 를 따로 두면 같은 데이터를 두 번 훑게 된다.
+    val_names = list(train_syms)
+    val_loaders = [make_loader(build_split(args.cache, [s], val_dates, **kw),
+                               args.batch_size, False, args.workers)
+                   for s in train_syms]
 
     test_syms = args.symbols                       # 제외 종목도 시험에는 포함
-    test_names = ["all"] + test_syms
-    test_loaders = [make_loader(
-        build_split(args.cache, test_syms, test_dates, **kw),
-        args.batch_size, False, args.workers)]
-    for sym in test_syms:
-        test_loaders.append(make_loader(
-            build_split(args.cache, [sym], test_dates, **kw),
-            args.batch_size, False, args.workers))
+    test_names = list(test_syms)
+    test_loaders = [make_loader(build_split(args.cache, [s], test_dates, **kw),
+                                args.batch_size, False, args.workers)
+                    for s in test_syms]
 
     model_config = dict(
         hidden_dim=args.hidden_dim,
