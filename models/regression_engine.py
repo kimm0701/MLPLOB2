@@ -34,6 +34,33 @@ from utils.metrics import format_table, summarise
 LOSS_SCALE = 1e4          # 소수 수익률 -> bp. 손실을 O(1) 로 만들기 위한 상수배
 
 
+def load_model_from_checkpoint(path: str, map_location="cpu"):
+    """체크포인트에서 모델만 복원한다 (추론·백테스트용).
+
+    LightningModule.load_from_checkpoint 는 __init__ 인자를 그대로 다시 넣어
+    객체를 만드는데, 여기서는 model 이 객체라 저장돼 있지 않다. 그래서
+    저장해 둔 model_config 로 구조를 다시 세우고 가중치만 얹는다.
+    """
+    from models.mlplob import MLPLOB
+
+    ck = torch.load(path, map_location=map_location, weights_only=False)
+    hp = ck.get("hyper_parameters", {})
+    cfg = dict(hp.get("model_config") or {})
+    if not cfg:
+        raise ValueError(
+            f"{path} 에 model_config 가 없습니다. 이 체크포인트는 구조 정보를 "
+            "저장하기 전 버전입니다. 다시 학습하세요."
+        )
+
+    model = MLPLOB(**cfg)
+    state = {k[len("model."):]: v for k, v in ck["state_dict"].items()
+             if k.startswith("model.")}
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if missing or unexpected:
+        raise ValueError(f"가중치가 맞지 않습니다. 없음={missing} 남음={unexpected}")
+    return model.eval(), hp
+
+
 def build_loss(loss_type: str) -> nn.Module:
     """사양 §16. 기본 mse, huber 선택 가능."""
     key = (loss_type or spec.LOSS_TYPE).lower()
@@ -62,9 +89,14 @@ class RegressionEngine(LightningModule):
         eval_names: list[str] | None = None,
         ckpt_dir: str | None = None,
         horizons=tuple(spec.TARGET_HORIZONS_SEC),
+        model_config: dict | None = None,
     ):
         super().__init__()
         self.model = model
+        # 모델 객체 자체는 하이퍼파라미터로 저장할 수 없다. 대신 생성 인자를
+        # 남겨서 나중에 체크포인트만으로 같은 구조를 다시 만들 수 있게 한다.
+        # 이게 없으면 백테스트가 체크포인트를 열 수 없다.
+        self.model_config = dict(model_config or {})
         self.lr = lr
         self.optimizer_name = optimizer_name
         self.loss_type = loss_type

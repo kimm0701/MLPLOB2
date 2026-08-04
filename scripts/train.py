@@ -64,7 +64,10 @@ def build_args():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--batch-size", type=int, default=1024)
     ap.add_argument("--optimizer", default="Adam")
-    ap.add_argument("--loss", default=spec.LOSS_TYPE, choices=["mse", "huber"])
+    # tune.py 가 찾아낸 설정을 그대로 붙여넣을 수 있게 Optuna 파라미터 이름
+    # (loss_type) 을 그대로 쓴 별칭도 받는다.
+    ap.add_argument("--loss", "--loss-type", dest="loss",
+                    default=spec.LOSS_TYPE, choices=["mse", "huber"])
     ap.add_argument("--weight-decay", type=float, default=0.0)
 
     ap.add_argument("--max-epochs", type=int, default=10)
@@ -137,13 +140,14 @@ def main() -> int:
             build_split(args.cache, [sym], test_dates, **kw),
             args.batch_size, False, args.workers))
 
-    model = MLPLOB(
+    model_config = dict(
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
         seq_size=spec.SEQ_LEN,
         num_features=spec.INPUT_DIM,
         dataset_type="OFI",
     )
+    model = MLPLOB(**model_config)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"모델 파라미터 {n_params:,}개\n")
 
@@ -160,6 +164,7 @@ def main() -> int:
         weight_decay=args.weight_decay,
         eval_names=val_names,
         ckpt_dir=ckpt_dir,
+        model_config=model_config,
     )
 
     trainer = L.Trainer(
