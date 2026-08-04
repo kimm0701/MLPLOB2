@@ -18,14 +18,18 @@ import argparse
 import os
 import sys
 
-import lightning as L
 import torch
-from lightning.pytorch.callbacks import EarlyStopping, TQDMProgressBar
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import constants as cst                                        # noqa: E402
+from utils.lightning_compat import (                           # noqa: E402
+    EarlyStopping,
+    TQDMProgressBar,
+    Trainer,
+    seed_everything,
+)
 import ofi_spec as spec                                        # noqa: E402
 from models.mlplob import MLPLOB                               # noqa: E402
 from models.regression_engine import RegressionEngine          # noqa: E402
@@ -100,7 +104,7 @@ def thin(ds, stride: int):
 
 def main() -> int:
     args = build_args()
-    L.seed_everything(args.seed, workers=True)
+    seed_everything(args.seed, workers=True)
 
     train_dates, val_dates, test_dates = split_dates(
         args.dates, args.n_val, args.n_test)
@@ -167,7 +171,7 @@ def main() -> int:
         model_config=model_config,
     )
 
-    trainer = L.Trainer(
+    trainer = Trainer(
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         max_epochs=args.max_epochs,
         callbacks=[

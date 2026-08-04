@@ -25,8 +25,9 @@ import os
 
 import numpy as np
 import torch
-from lightning import LightningModule
 from torch import nn
+
+from utils.lightning_compat import LightningModule
 
 import ofi_spec as spec
 from utils.metrics import format_table, summarise

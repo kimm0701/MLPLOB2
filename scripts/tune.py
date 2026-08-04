@@ -23,14 +23,17 @@ import argparse
 import os
 import sys
 
-import lightning as L
 import torch
-from lightning.pytorch.callbacks import Callback, EarlyStopping
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import ofi_spec as spec                                        # noqa: E402
+from utils.lightning_compat import (                           # noqa: E402
+    Callback,
+    EarlyStopping,
+    Trainer,
+)
 from models.mlplob import MLPLOB                               # noqa: E402
 from models.regression_engine import RegressionEngine          # noqa: E402
 from preprocessing.ofi_dataset import build_split, split_dates  # noqa: E402
@@ -123,7 +126,7 @@ def main() -> int:
                                   weight_decay=wd, eval_names=["all"],
                                   model_config=cfg)
 
-        trainer = L.Trainer(
+        trainer = Trainer(
             accelerator="gpu" if torch.cuda.is_available() else "cpu",
             max_epochs=args.max_epochs,
             callbacks=[PruningCallback(trial),
