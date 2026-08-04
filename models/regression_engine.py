@@ -71,13 +71,22 @@ def load_model_from_checkpoint(path: str, map_location="cpu"):
     return model.eval(), hp
 
 
-def build_loss(loss_type: str) -> nn.Module:
-    """사양 §16. 기본 mse, huber 선택 가능."""
+def build_loss(loss_type: str, huber_beta: float = 1.0) -> nn.Module:
+    """사양 §16. 기본 mse, huber 선택 가능.
+
+    huber_beta 는 "어디까지를 신호로 보고 어디부터를 잡음으로 볼지"의 경계다.
+    손실을 bp 단위로 재므로 beta 도 bp 다. beta 아래의 오차는 제곱으로(=MSE
+    처럼), 위는 직선으로(=MAE 처럼) 벌점을 매긴다.
+
+    기본값 1.0 은 우리 데이터에 너무 작다. 오차가 대개 2~5bp 라 거의 전 구간이
+    직선이 되어 사실상 MAE 로 동작한다. 정답의 표준편차가 1.6~4.9bp 이므로
+    그 2~3배 근처가 경계로 적당하고, tune.py 가 이 값을 탐색한다.
+    """
     key = (loss_type or spec.LOSS_TYPE).lower()
     if key == "mse":
         return nn.MSELoss()
     if key in ("huber", "smoothl1"):
-        return nn.SmoothL1Loss()
+        return nn.SmoothL1Loss(beta=float(huber_beta))
     raise ValueError(f"모르는 손실함수: {loss_type!r}. 'mse' 또는 'huber'")
 
 
@@ -101,6 +110,7 @@ class RegressionEngine(LightningModule):
         horizons=tuple(spec.TARGET_HORIZONS_SEC),
         model_config: dict | None = None,
         pooled_name: str | None = "all",
+        huber_beta: float = 1.0,
     ):
         super().__init__()
         self.model = model
@@ -111,6 +121,7 @@ class RegressionEngine(LightningModule):
         self.lr = lr
         self.optimizer_name = optimizer_name
         self.loss_type = loss_type
+        self.huber_beta = huber_beta
         self.weight_decay = weight_decay
         self.eval_names = list(eval_names or ["all"])
         # 종목별 결과를 이어붙여 만들 합산 항목의 이름. None 이면 안 만든다.
@@ -118,7 +129,7 @@ class RegressionEngine(LightningModule):
         self.ckpt_dir = ckpt_dir
         self.horizons = list(horizons)
 
-        self.criterion = build_loss(loss_type)
+        self.criterion = build_loss(loss_type, huber_beta)
         self.save_hyperparameters(ignore=["model"])
 
         self._train_losses: list[float] = []

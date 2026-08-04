@@ -47,7 +47,7 @@ class _FallbackPruningCallback(Callback):
     지금까지의 중앙값보다 나쁘면 그 시도를 중간에 끊는다.
     """
 
-    def __init__(self, trial, monitor: str = "val_mse"):
+    def __init__(self, trial, monitor: str = "val_ic"):
         self.trial = trial
         self.monitor = monitor
 
@@ -64,7 +64,7 @@ class _FallbackPruningCallback(Callback):
                 f"({self.monitor}={float(value):.5f})")
 
 
-def make_pruning_callback(trial, monitor: str = "val_mse"):
+def make_pruning_callback(trial, monitor: str = "val_ic"):
     """가지치기 콜백. 공식 통합 패키지가 있으면 그걸 쓴다.
 
         pip install optuna-integration
@@ -185,6 +185,8 @@ def main() -> int:
         batch = trial.suggest_categorical("batch_size", [128, 256, 512])
         loss = trial.suggest_categorical("loss_type", ["mse", "huber"])
         wd = trial.suggest_float("weight_decay", 1e-8, 1e-2, log=True)
+        # 오차 몇 bp 까지를 신호로 볼지. huber 일 때만 쓰인다.
+        beta = trial.suggest_float("huber_beta", 1.0, 10.0) if loss == "huber" else 1.0
 
         pruner_cb, kind = make_pruning_callback(trial)
         if trial.number == 0:
@@ -194,13 +196,14 @@ def main() -> int:
                    num_features=spec.INPUT_DIM, dataset_type="OFI")
         engine = RegressionEngine(model=MLPLOB(**cfg), lr=lr, loss_type=loss,
                                   weight_decay=wd, eval_names=["all"],
-                                  model_config=cfg, pooled_name=None)
+                                  model_config=cfg, pooled_name=None,
+                                  huber_beta=beta)
 
         trainer = Trainer(
             accelerator="gpu" if torch.cuda.is_available() else "cpu",
             max_epochs=args.max_epochs,
             callbacks=[pruner_cb,
-                       EarlyStopping(monitor="val_mse", mode="min", patience=1)],
+                       EarlyStopping(monitor="val_ic", mode="max", patience=1)],
             num_sanity_val_steps=0,
             limit_train_batches=args.limit_train_batches,
             limit_val_batches=args.limit_val_batches,
@@ -212,17 +215,21 @@ def main() -> int:
                     make_loader(train_ds, batch, True, args.workers),
                     make_loader(val_ds, batch, False, args.workers))
 
-        # 채점은 val_mse 로 한다. 학습 손실(val_loss)을 쓰면 huber 시도가
-        # 항상 mse 시도보다 작은 값을 내서, 성능과 무관하게 huber 만 선택된다.
-        # 실측: 같은 데이터에서 huber 2.08 대 mse 20.80.
-        value = trainer.callback_metrics.get("val_mse")
-        return float(value) if value is not None else float("inf")
+        # 채점은 IC 로 한다.
+        #  - 학습 손실로 채점하면 huber 가 mse 보다 항상 작은 값을 내서
+        #    (실측 2.08 대 20.80) 성능과 무관하게 huber 만 뽑힌다.
+        #  - val_mse 로 채점하면 반대로 mse 로 학습한 쪽이 유리하다. 자기가
+        #    최적화한 지표로 채점받기 때문이다.
+        #  - IC 는 어느 손실로 학습했든 공평하고, R2 <= IC^2 이므로 R2 의
+        #    천장을 직접 올린다. 크기는 학습 후 배율 보정으로 맞춘다.
+        value = trainer.callback_metrics.get("val_ic")
+        return float(value) if value is not None else float("-inf")
 
     study = optuna.create_study(
         study_name=args.study,
         storage=args.storage,
         load_if_exists=bool(args.storage),
-        direction="minimize",
+        direction="maximize",   # IC 는 클수록 좋다
         sampler=optuna.samplers.TPESampler(seed=1),
         # 3 epoch 까지는 지켜보고, 그 뒤로 중앙값보다 나쁘면 끊는다
         pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=2),

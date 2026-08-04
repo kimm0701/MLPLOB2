@@ -165,11 +165,58 @@ def test_mse_metric_is_the_same_whatever_loss_trained_it():
     assert np.isfinite(a).all() and (a > 0).all()
 
 
-def test_tune_scores_on_val_mse_not_val_loss():
-    """채점 기준이 손실이 아니라 지표를 향하고 있는지 소스로 확인한다."""
+def test_tune_scores_on_ic_not_on_a_training_loss():
+    """채점 기준이 손실이 아니라 IC 여야 한다.
+
+    학습 손실로 채점하면 huber 가 늘 이기고, val_mse 로 채점하면 mse 로 학습한
+    쪽이 이긴다. 둘 다 자기가 최적화한 지표로 채점받는 셈이다. IC 는 어느
+    손실로 학습했든 공평하다.
+    """
     import io as _io
     import os as _os
     src = _io.open(_os.path.join(_os.path.dirname(_os.path.dirname(
         _os.path.abspath(__file__))), "scripts", "tune.py"), encoding="utf-8").read()
-    assert 'callback_metrics.get("val_mse")' in src
+    assert 'callback_metrics.get("val_ic")' in src
     assert 'callback_metrics.get("val_loss")' not in src
+    assert 'direction="maximize"' in src, "IC 는 클수록 좋다"
+
+
+# ---------------------------------------------------------------------------
+# huber_beta — 어디까지를 신호로 볼지의 경계
+# ---------------------------------------------------------------------------
+def test_huber_beta_controls_how_much_outliers_outweigh_ordinary_errors():
+    """beta 가 클수록 큰 오차의 **상대 비중**이 커진다 (MSE 에 가까워진다).
+
+    절대값으로 비교하면 안 된다. SmoothL1 은 제곱 구간에서 beta 로 나누므로
+    beta 를 키우면 손실값 자체는 어디서나 작아진다. 학습에 영향을 주는 건
+    "평범한 오차 대비 튀는 오차의 비중"이다.
+    """
+    target = torch.zeros(1, 1)
+    outlier = torch.full((1, 1), 8.0)            # 튀는 오차 8bp
+    normal = torch.full((1, 1), 0.5)             # 평범한 오차 0.5bp
+
+    def ratio(loss):
+        return loss(outlier, target).item() / loss(normal, target).item()
+
+    r_small = ratio(build_loss("huber", huber_beta=1.0))
+    r_large = ratio(build_loss("huber", huber_beta=10.0))
+    r_mse = ratio(build_loss("mse"))
+
+    assert r_small < r_large <= r_mse * 1.01, (
+        f"beta 1 -> {r_small:.0f}배,  beta 10 -> {r_large:.0f}배,  "
+        f"mse -> {r_mse:.0f}배")
+    assert r_small < 100, "beta 1 이면 튀는 값의 비중이 크게 눌린다"
+
+
+def test_huber_beta_reaches_the_engine():
+    cfg = dict(hidden_dim=32, num_layers=2, seq_size=SEQ,
+               num_features=FEAT, dataset_type="OFI")
+    e = RegressionEngine(model=MLPLOB(**cfg), loss_type="huber", huber_beta=4.0)
+    assert isinstance(e.criterion, nn.SmoothL1Loss)
+    assert e.criterion.beta == pytest.approx(4.0)
+
+
+def test_beta_is_ignored_for_mse():
+    e = RegressionEngine(model=MLPLOB(32, 2, SEQ, FEAT, "OFI"),
+                         loss_type="mse", huber_beta=7.0)
+    assert isinstance(e.criterion, nn.MSELoss)
