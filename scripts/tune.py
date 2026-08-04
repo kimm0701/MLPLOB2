@@ -40,8 +40,12 @@ from preprocessing.ofi_dataset import build_split, split_dates  # noqa: E402
 from scripts.download_data import FILE_IDS, WEEKDAYS           # noqa: E402
 
 
-class PruningCallback(Callback):
-    """epoch 마다 검증 손실을 Optuna 에 보고하고, 가망 없으면 끊는다."""
+class _FallbackPruningCallback(Callback):
+    """공식 통합 패키지가 없을 때 쓰는 최소 구현.
+
+    하는 일은 공식과 같다 — epoch 마다 검증 손실을 Optuna 에 보고하고,
+    지금까지의 중앙값보다 나쁘면 그 시도를 중간에 끊는다.
+    """
 
     def __init__(self, trial, monitor: str = "val_loss"):
         self.trial = trial
@@ -58,6 +62,30 @@ class PruningCallback(Callback):
             raise optuna.TrialPruned(
                 f"epoch {trainer.current_epoch} 에서 가지치기 "
                 f"({self.monitor}={float(value):.5f})")
+
+
+def make_pruning_callback(trial, monitor: str = "val_loss"):
+    """가지치기 콜백. 공식 통합 패키지가 있으면 그걸 쓴다.
+
+        pip install optuna-integration
+
+    공식 쪽은 lightning / pytorch_lightning 중 한쪽 Trainer 만 받아들이도록
+    타입 검사를 하는 판본이 있어서, 이 저장소처럼 두 배포판을 모두 지원하는
+    환경에서는 실패할 수 있다. 그래서 실패하면 같은 동작의 자체 구현으로
+    넘어간다 — 탐색 자체가 멈추는 것보다 낫다.
+    """
+    try:
+        from optuna_integration.pytorch_lightning import (
+            PyTorchLightningPruningCallback,
+        )
+        return PyTorchLightningPruningCallback(trial, monitor=monitor), "공식"
+    except Exception:                                   # noqa: BLE001
+        pass
+    try:
+        from optuna.integration import PyTorchLightningPruningCallback
+        return PyTorchLightningPruningCallback(trial, monitor=monitor), "공식(구버전)"
+    except Exception:                                   # noqa: BLE001
+        return _FallbackPruningCallback(trial, monitor), "자체"
 
 
 def make_loader(ds, batch_size, shuffle, workers):
@@ -158,6 +186,10 @@ def main() -> int:
         loss = trial.suggest_categorical("loss_type", ["mse", "huber"])
         wd = trial.suggest_float("weight_decay", 1e-8, 1e-2, log=True)
 
+        pruner_cb, kind = make_pruning_callback(trial)
+        if trial.number == 0:
+            print(f"가지치기 콜백: {kind}")
+
         cfg = dict(hidden_dim=hidden, num_layers=layers, seq_size=spec.SEQ_LEN,
                    num_features=spec.INPUT_DIM, dataset_type="OFI")
         engine = RegressionEngine(model=MLPLOB(**cfg), lr=lr, loss_type=loss,
@@ -167,7 +199,7 @@ def main() -> int:
         trainer = Trainer(
             accelerator="gpu" if torch.cuda.is_available() else "cpu",
             max_epochs=args.max_epochs,
-            callbacks=[PruningCallback(trial),
+            callbacks=[pruner_cb,
                        EarlyStopping(monitor="val_loss", mode="min", patience=1)],
             num_sanity_val_steps=0,
             limit_train_batches=args.limit_train_batches,

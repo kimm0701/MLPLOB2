@@ -20,3 +20,5 @@ wandb
 kagglehub
 onnx
 onnxruntime-gpu
+optuna
+optuna-integration
