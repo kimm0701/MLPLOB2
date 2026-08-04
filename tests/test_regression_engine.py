@@ -220,3 +220,20 @@ def test_beta_is_ignored_for_mse():
     e = RegressionEngine(model=MLPLOB(32, 2, SEQ, FEAT, "OFI"),
                          loss_type="mse", huber_beta=7.0)
     assert isinstance(e.criterion, nn.MSELoss)
+
+
+def test_collapsed_prediction_is_scored_bad_not_failed():
+    """상수 예측이면 IC 가 NaN 이다. 그대로 두면 Optuna 가 시도를 버려서
+    같은 영역을 다시 뽑는다. 최하점으로 기록해야 그 근처를 피한다."""
+    import io as _io
+    import os as _os
+    from utils.metrics import information_coefficient
+
+    const = np.zeros((100, 3))
+    target = np.random.default_rng(9).normal(size=(100, 3))
+    assert np.isnan(information_coefficient(const, target)).all()
+
+    src = _io.open(_os.path.join(_os.path.dirname(_os.path.dirname(
+        _os.path.abspath(__file__))), "scripts", "tune.py"), encoding="utf-8").read()
+    assert "BAD_SCORE = -1.0" in src
+    assert "math.isfinite" in src

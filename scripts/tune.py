@@ -20,6 +20,7 @@
 """
 
 import argparse
+import math
 import os
 import sys
 
@@ -105,6 +106,10 @@ def thin(ds, stride):
 # 실측 기준값. hidden_dim 40 / batch 1024 로 2,428 배치를 404초에 처리했고
 # (초당 6,158 샘플), 검증은 배치당 약 4배 빨랐다. 탐색 범위 중앙인 hidden 128
 # 은 파라미터가 2.8배라 보수적으로 3배 느리다고 본다.
+# 상수 예측 등으로 IC 가 정의되지 않을 때 줄 점수. 실제 IC 는 -1 아래로
+# 내려갈 수 없으므로 어떤 정상 시도보다도 나쁘다.
+BAD_SCORE = -1.0
+
 TRAIN_SAMPLES_PER_SEC = 2_000
 VAL_SAMPLES_PER_SEC = 8_000
 
@@ -223,7 +228,16 @@ def main() -> int:
         #  - IC 는 어느 손실로 학습했든 공평하고, R2 <= IC^2 이므로 R2 의
         #    천장을 직접 올린다. 크기는 학습 후 배율 보정으로 맞춘다.
         value = trainer.callback_metrics.get("val_ic")
-        return float(value) if value is not None else float("-inf")
+        if value is None or not math.isfinite(float(value)):
+            # 예측이 상수로 무너지면 상관계수가 정의되지 않아 NaN 이 된다.
+            # 실측: weight_decay 8.6e-3 이 모델을 눌러 이 상태를 만들었다.
+            # NaN 을 그대로 돌려주면 Optuna 가 시도를 FAIL 로 버리고 아무것도
+            # 배우지 못해 같은 영역을 다시 뽑는다. 나쁜 점수로 기록해야
+            # TPE 가 그 근처를 피한다.
+            print(f"  Trial {trial.number}: 예측이 상수로 무너짐 "
+                  f"(wd={wd:.2e}) -> 최하점 처리")
+            return BAD_SCORE
+        return float(value)
 
     study = optuna.create_study(
         study_name=args.study,
