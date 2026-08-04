@@ -47,7 +47,7 @@ class _FallbackPruningCallback(Callback):
     지금까지의 중앙값보다 나쁘면 그 시도를 중간에 끊는다.
     """
 
-    def __init__(self, trial, monitor: str = "val_loss"):
+    def __init__(self, trial, monitor: str = "val_mse"):
         self.trial = trial
         self.monitor = monitor
 
@@ -64,7 +64,7 @@ class _FallbackPruningCallback(Callback):
                 f"({self.monitor}={float(value):.5f})")
 
 
-def make_pruning_callback(trial, monitor: str = "val_loss"):
+def make_pruning_callback(trial, monitor: str = "val_mse"):
     """가지치기 콜백. 공식 통합 패키지가 있으면 그걸 쓴다.
 
         pip install optuna-integration
@@ -200,7 +200,7 @@ def main() -> int:
             accelerator="gpu" if torch.cuda.is_available() else "cpu",
             max_epochs=args.max_epochs,
             callbacks=[pruner_cb,
-                       EarlyStopping(monitor="val_loss", mode="min", patience=1)],
+                       EarlyStopping(monitor="val_mse", mode="min", patience=1)],
             num_sanity_val_steps=0,
             limit_train_batches=args.limit_train_batches,
             limit_val_batches=args.limit_val_batches,
@@ -212,7 +212,10 @@ def main() -> int:
                     make_loader(train_ds, batch, True, args.workers),
                     make_loader(val_ds, batch, False, args.workers))
 
-        value = trainer.callback_metrics.get("val_loss")
+        # 채점은 val_mse 로 한다. 학습 손실(val_loss)을 쓰면 huber 시도가
+        # 항상 mse 시도보다 작은 값을 내서, 성능과 무관하게 huber 만 선택된다.
+        # 실측: 같은 데이터에서 huber 2.08 대 mse 20.80.
+        value = trainer.callback_metrics.get("val_mse")
         return float(value) if value is not None else float("inf")
 
     study = optuna.create_study(

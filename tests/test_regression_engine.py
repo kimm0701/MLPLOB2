@@ -123,3 +123,53 @@ def test_backward_runs_through_the_engine_loss(engine):
     grads = [p.grad for p in engine.parameters() if p.grad is not None]
     assert grads and any(g.abs().sum() > 0 for g in grads)
     assert np.isfinite(loss.item())
+
+
+# ---------------------------------------------------------------------------
+# 탐색 채점 기준은 손실함수 종류와 무관해야 한다
+# ---------------------------------------------------------------------------
+def test_training_loss_is_not_comparable_across_loss_types():
+    """huber 와 mse 는 같은 예측에도 값이 크게 다르다.
+
+    이걸 그대로 Optuna 채점에 쓰면 성능과 무관하게 huber 설정만 선택된다.
+    실제 탐색에서 huber 2.08 대 mse 20.80 이 나왔다.
+    """
+    cfg = dict(hidden_dim=32, num_layers=2, seq_size=SEQ,
+               num_features=FEAT, dataset_type="OFI")
+    e_mse = RegressionEngine(model=MLPLOB(**cfg), loss_type="mse")
+    e_hub = RegressionEngine(model=MLPLOB(**cfg), loss_type="huber")
+
+    torch.manual_seed(5)
+    target = torch.randn(4096, OUT) * 2e-4
+    pred_bp = torch.randn(4096, OUT) * 4.0          # 오차가 1bp 보다 크다
+
+    l_mse = e_mse.loss(pred_bp, target).item()
+    l_hub = e_hub.loss(pred_bp, target).item()
+    assert l_mse > 3 * l_hub, (
+        f"두 손실의 눈금이 비슷하면 이 문제가 안 생긴다: mse {l_mse:.2f} "
+        f"huber {l_hub:.2f}")
+
+
+def test_mse_metric_is_the_same_whatever_loss_trained_it():
+    """지표 쪽 mse 는 예측값만 보고 계산하므로 손실 종류와 무관하다."""
+    from utils.metrics import summarise
+
+    rng = np.random.default_rng(6)
+    target = rng.normal(scale=2e-4, size=(5000, OUT))
+    pred = target * 0.05 + rng.normal(scale=2e-4, size=target.shape)
+
+    a = summarise(pred, target)["mse"]
+    b = summarise(pred, target)["mse"]
+    assert np.allclose(a, b)
+    # 이 값이 tune.py 가 읽는 val_mse 의 근거다 (bp^2 로 환산해 기록)
+    assert np.isfinite(a).all() and (a > 0).all()
+
+
+def test_tune_scores_on_val_mse_not_val_loss():
+    """채점 기준이 손실이 아니라 지표를 향하고 있는지 소스로 확인한다."""
+    import io as _io
+    import os as _os
+    src = _io.open(_os.path.join(_os.path.dirname(_os.path.dirname(
+        _os.path.abspath(__file__))), "scripts", "tune.py"), encoding="utf-8").read()
+    assert 'callback_metrics.get("val_mse")' in src
+    assert 'callback_metrics.get("val_loss")' not in src

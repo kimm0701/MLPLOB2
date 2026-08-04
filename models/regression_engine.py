@@ -191,6 +191,10 @@ class RegressionEngine(LightningModule):
                      add_dataloader_idx=False)
             self.log(f"{stage}_dir/{name}", float(np.nanmean(s["dir_acc"])),
                      add_dataloader_idx=False)
+            # 학습에 쓴 손실함수와 무관한 지표. huber 와 mse 는 같은 예측에도
+            # 값이 10배 다르게 나오므로, 설정끼리 비교하려면 공통 자가 필요하다.
+            self.log(f"{stage}_mse/{name}", float(np.nanmean(s["mse"])) * 1e8,
+                     add_dataloader_idx=False)
 
         # 합산 성적은 종목별 결과를 이어붙여 계산한다. 합산용 dataloader 를
         # 따로 두면 같은 데이터를 두 번 훑어 검증 시간이 두 배가 된다.
@@ -208,6 +212,11 @@ class RegressionEngine(LightningModule):
         # 조기 종료와 체크포인트는 합산 성적 기준
         primary = report[next(iter(report))]
         self.log(f"{stage}_loss", primary["loss"], prog_bar=True,
+                 add_dataloader_idx=False)
+        # bp^2 단위. 손실함수 종류가 달라도 이 값끼리는 비교된다.
+        self.log(f"{stage}_mse", float(np.nanmean(primary["mse"])) * 1e8,
+                 add_dataloader_idx=False)
+        self.log(f"{stage}_ic", float(np.nanmean(primary["ic"])),
                  add_dataloader_idx=False)
 
         self._print_report(stage, report)
