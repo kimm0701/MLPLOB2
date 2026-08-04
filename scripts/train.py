@@ -63,10 +63,15 @@ def build_args():
     ap.add_argument("--n-val", type=int, default=2)
     ap.add_argument("--n-test", type=int, default=2)
 
-    ap.add_argument("--hidden-dim", type=int, default=40)
+    ap.add_argument("--hidden-dim", type=int, default=128,
+                    help="원본 config.py 의 hyperparameters_sweep 값. "
+                         "hyperparameters_fixed 의 40 은 BTC 전용 덮어쓰기이고, "
+                         "논문 주력 데이터셋(FI-2010)은 144 를 쓴다")
     ap.add_argument("--num-layers", type=int, default=3)
     ap.add_argument("--lr", type=float, default=3e-4)
-    ap.add_argument("--batch-size", type=int, default=1024)
+    ap.add_argument("--batch-size", type=int, default=256,
+                    help="원본은 32~128. 배치가 크면 epoch 당 가중치 갱신 "
+                         "횟수가 그만큼 줄어 과소적합으로 이어진다")
     ap.add_argument("--optimizer", default="Adam")
     # tune.py 가 찾아낸 설정을 그대로 붙여넣을 수 있게 Optuna 파라미터 이름
     # (loss_type) 을 그대로 쓴 별칭도 받는다.
@@ -77,9 +82,10 @@ def build_args():
     ap.add_argument("--max-epochs", type=int, default=10)
     ap.add_argument("--patience", type=int, default=2)
     ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--stride", type=int, default=20,
-                    help="학습 샘플 간격. 20 이면 1초마다 하나 (0.05초 x 20). "
-                         "이웃 샘플은 100칸 중 99칸이 겹쳐서 대부분 중복이다. "
+    ap.add_argument("--stride", type=int, default=5,
+                    help="학습 샘플 간격. 5 면 0.25초마다 하나. 이웃 샘플은 "
+                         "100칸 중 99칸이 겹치지만, 20 으로 두면 데이터의 "
+                         "1/20 만 쓰게 되어 갱신 횟수가 크게 부족해진다. "
                          "검증·시험은 항상 전부(1) 쓴다")
     ap.add_argument("--limit-train-batches", type=float, default=1.0)
     ap.add_argument("--limit-val-batches", type=float, default=1.0,

@@ -83,7 +83,7 @@ def main() -> int:
     ap.add_argument("--n-test", type=int, default=2)
     ap.add_argument("--trials", type=int, default=25)
     ap.add_argument("--max-epochs", type=int, default=4)
-    ap.add_argument("--stride", type=int, default=40,
+    ap.add_argument("--stride", type=int, default=10,
                     help="탐색 중에는 더 성글게 뽑아 한 시도를 빨리 끝낸다")
     ap.add_argument("--train-days", type=int, default=0,
                     help="0 이면 학습 날짜 전부. 줄이면 한 시도가 빨라진다")
@@ -117,10 +117,10 @@ def main() -> int:
     print(f"학습 {len(train_ds):,}샘플 (간격 {args.stride})   검증 {len(val_ds):,}샘플\n")
 
     def objective(trial):
-        hidden = trial.suggest_categorical("hidden_dim", [32, 40, 64, 128])
-        layers = trial.suggest_int("num_layers", 2, 5)
+        hidden = trial.suggest_categorical("hidden_dim", [64, 128, 144, 192, 256])
+        layers = trial.suggest_int("num_layers", 2, 6)
         lr = trial.suggest_float("lr", 1e-5, 3e-3, log=True)
-        batch = trial.suggest_categorical("batch_size", [512, 1024, 2048])
+        batch = trial.suggest_categorical("batch_size", [128, 256, 512])
         loss = trial.suggest_categorical("loss_type", ["mse", "huber"])
         wd = trial.suggest_float("weight_decay", 1e-8, 1e-2, log=True)
 
