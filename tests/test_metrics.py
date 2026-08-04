@@ -127,3 +127,39 @@ def test_summarise_shapes_and_horizons():
     assert s["n"] == 1000
     assert s["horizons"][0] == 1 and s["horizons"][-1] == 10
     assert (s["ic"] > 0).all(), "예측에 신호를 섞었으므로 IC 는 양수여야 한다"
+
+
+# ---------------------------------------------------------------------------
+# 배율 보정 (scripts/calibrate.py)
+# ---------------------------------------------------------------------------
+def test_calibration_recovers_r2_up_to_ic_squared():
+    """크기가 어긋난 예측은 R2 가 IC^2 보다 낮고, 배율을 맞추면 회복된다."""
+    import sys, os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from scripts.calibrate import fit_scale
+
+    rng = np.random.default_rng(11)
+    t = rng.normal(scale=2e-4, size=(50_000, 3))
+    signal = t * 0.05 + rng.normal(scale=2e-4, size=t.shape) * 0.999
+    pred = signal * 7.0                      # 크기를 7배 부풀린 예측
+
+    ic = information_coefficient(pred, t, rank=False)
+    before = r2(pred, t)
+    assert (before < 0).all(), "부풀린 예측은 평균값 답하기보다도 못하다"
+
+    alpha, beta = fit_scale(pred, t)
+    after = r2(pred * alpha + beta, t)
+
+    assert (after > before).all()
+    assert np.allclose(after, ic ** 2, atol=1e-4), "보정 후 R2 는 IC^2 에 도달한다"
+
+
+def test_calibration_leaves_a_well_scaled_prediction_alone():
+    rng = np.random.default_rng(12)
+    t = rng.normal(scale=2e-4, size=(20_000, 2))
+    pred = t * 0.05 + rng.normal(scale=2e-4, size=t.shape)
+
+    from scripts.calibrate import fit_scale
+    alpha, _ = fit_scale(pred, t)
+    r2_before, r2_after = r2(pred, t), r2(pred * alpha, t)
+    assert (r2_after >= r2_before - 1e-12).all(), "보정이 성능을 깎으면 안 된다"
