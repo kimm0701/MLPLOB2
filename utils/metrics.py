@@ -45,11 +45,24 @@ def directional_accuracy(pred, target) -> np.ndarray:
     return out
 
 
-def information_coefficient(pred, target, rank: bool = True) -> np.ndarray:
+def information_coefficient(pred, target, rank: bool = False) -> np.ndarray:
     """예측과 실제의 상관계수. 이 분야에서 IC 라고 부른다.
 
-    rank=True 면 순위상관(스피어만)이다. 수익률은 꼬리가 두꺼워서 값 그대로
-    상관을 내면 극단값 몇 개가 결과를 좌우한다. 순위로 바꾸면 그 영향이 사라진다.
+    기본은 **피어슨(값상관)** 이다. 우리 목표가 R2 이고
+
+        R2 = (피어슨 상관)^2          (배율을 맞췄을 때)
+
+    이므로, 순위상관으로 재면 목표와 다른 걸 재는 셈이 된다. 실제로 그 착오로
+    천장(IC^2)을 2.4배 부풀려 계산한 적이 있다 — 순위상관이 피어슨보다 1.5배
+    높게 나와서, 실은 한계에 도달한 모델을 "절반밖에 못 쓴다"고 오진했다.
+
+    rank=True 면 순위상관(스피어만)이다. 극단값에 안 흔들리는 게 장점인데,
+    그건 표본이 적을 때의 이야기다. 표본이 1000만 개면 이상치 몇 개로 추정값이
+    흔들리지 않으므로 그 장점이 사라진다. 순위 자체를 거래할 때
+    (예: 여러 종목 중 상위 몇 개 매수) 는 여전히 순위상관이 맞다.
+
+    두 값의 **비율**은 진단에 쓴다. 정규분포면 약 1.0 인데, 우리 데이터는
+    1.5 다 — 순서는 맞히지만 크기 관계가 직선이 아니라는 뜻이다.
 
     0 이면 무관, 0.02~0.05 면 초단타에서는 쓸만한 수준으로 본다.
     """
@@ -147,7 +160,8 @@ def summarise(pred, target, horizons=None) -> dict:
         mse=mse(p, t),
         mae=mae(p, t),
         dir_acc=directional_accuracy(p, t),
-        ic=information_coefficient(p, t),
+        ic=information_coefficient(p, t),                  # 피어슨 — R2 와 짝
+        ic_rank=information_coefficient(p, t, rank=True),  # 스피어만 — 진단용
         r2=r2(p, t),
         r2_cal=r2_calibrated(p, t),
         n=int(p.shape[0]),
@@ -159,14 +173,16 @@ def format_table(s: dict, title: str = "") -> str:
     if title:
         lines.append(title)
     lines.append(f"{'horizon':>8}{'MSE(bp^2)':>12}{'MAE(bp)':>10}"
-                 f"{'방향정확도':>11}{'IC':>9}{'R2':>9}{'R2(보정)':>11}")
-    lines.append("-" * 71)
+                 f"{'방향정확도':>11}{'IC':>9}{'IC순위':>9}{'천장IC²':>10}"
+                 f"{'R2':>10}{'R2(보정)':>11}")
+    lines.append("-" * 92)
     for j, h in enumerate(s["horizons"]):
         cal = s.get("r2_cal", s["r2"])[j]
+        rk = s.get("ic_rank", s["ic"])[j]
         lines.append(
             f"{h:>6}초{s['mse'][j]*1e8:>12.2f}{s['mae'][j]*1e4:>10.3f}"
-            f"{s['dir_acc'][j]*100:>10.2f}%{s['ic'][j]:>9.4f}{s['r2'][j]:>9.4f}"
-            f"{cal:>11.5f}"
+            f"{s['dir_acc'][j]*100:>10.2f}%{s['ic'][j]:>9.4f}{rk:>9.4f}"
+            f"{s['ic'][j]**2*100:>9.4f}%{s['r2'][j]*100:>9.4f}%{cal*100:>10.4f}%"
         )
     lines.append(f"표본 {s['n']:,}개")
     return "\n".join(lines)

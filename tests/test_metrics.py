@@ -79,6 +79,51 @@ def test_ic_is_rank_based_so_outliers_do_not_dominate():
     assert value_ic < rank_ic
 
 
+def test_ic_defaults_to_pearson_because_the_target_metric_is_r2():
+    """기본이 피어슨이어야 한다.
+
+    R2 = (피어슨 상관)^2 이므로, 순위상관으로 재면 목표와 다른 걸 재는 셈이다.
+    실제로 그 착오로 천장(IC^2)을 2.4배 부풀려 계산하고, 이미 한계에 도달한
+    모델을 "절반밖에 못 쓴다"고 오진했다.
+    """
+    rng = np.random.default_rng(21)
+    t = rng.standard_t(df=3, size=(200_000, 1))          # 꼬리가 두꺼운 분포
+    p = t * 0.05 + rng.standard_t(df=3, size=t.shape)
+
+    default = information_coefficient(p, t)
+    assert np.allclose(default, information_coefficient(p, t, rank=False)), \
+        "기본값은 피어슨이어야 한다"
+    assert not np.allclose(default, information_coefficient(p, t, rank=True))
+
+    # 배율을 맞춘 R2 는 피어슨의 제곱과 같다 — 순위상관으로는 성립하지 않는다
+    from utils.metrics import r2_calibrated
+    assert np.allclose(r2_calibrated(p, t), default ** 2, atol=1e-4)
+
+
+def test_rank_ic_runs_higher_on_fat_tails_so_ic_squared_overstates_the_ceiling():
+    """순위상관 > 피어슨. 그 제곱을 천장이라 부르면 도달 불가능한 값이 된다."""
+    rng = np.random.default_rng(22)
+    t = rng.standard_t(df=3, size=(200_000, 1))
+    p = t * 0.05 + rng.standard_t(df=3, size=t.shape)
+
+    from utils.metrics import r2_calibrated
+    pearson = information_coefficient(p, t, rank=False)[0]
+    spearman = information_coefficient(p, t, rank=True)[0]
+    assert spearman > pearson
+
+    reachable = r2_calibrated(p, t)[0]
+    assert reachable <= pearson ** 2 + 1e-9
+    assert reachable < spearman ** 2, "순위상관의 제곱은 넘을 수 없는 천장이다"
+
+
+def test_summarise_reports_both_correlations():
+    rng = np.random.default_rng(23)
+    t = rng.normal(scale=2e-4, size=(5000, 3))
+    s = summarise(t * 0.05 + rng.normal(scale=2e-4, size=t.shape), t)
+    assert s["ic"].shape == s["ic_rank"].shape == (3,)
+    assert not np.allclose(s["ic"], s["ic_rank"]), "둘을 구분해 기록해야 한다"
+
+
 def test_ic_of_noise_is_near_zero():
     rng = np.random.default_rng(3)
     t = rng.normal(size=(20000, 1))
