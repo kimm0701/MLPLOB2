@@ -41,6 +41,43 @@ from preprocessing.ofi_dataset import build_split, split_dates  # noqa: E402
 from scripts.download_data import FILE_IDS, WEEKDAYS           # noqa: E402
 
 
+METRICS_TO_KEEP = ("r2_cal", "r2", "ic", "dir_acc", "mse", "mae")
+
+
+def _jsonable(arr):
+    """numpy 배열 -> JSON 에 넣을 수 있는 리스트. NaN 은 None 으로."""
+    import numpy as np
+
+    return [None if not math.isfinite(float(v)) else round(float(v), 8)
+            for v in np.atleast_1d(arr)]
+
+
+class _ReportRecorder(Callback):
+    """검증 성적표를 통째로 Optuna DB 에 남긴다.
+
+    채점값 하나만 남기면 나중에 다른 지표를 보려고 전부 다시 학습해야 한다.
+    실제로 그 일이 있었다 — R2 를 보려는데 IC 만 저장돼 있었다. horizon 별
+    R2·IC·방향정확도·MSE 를 epoch 마다 남긴다. 용량은 시도당 몇 KB 다.
+
+    가지치기로 끊긴 시도도 끊기기 전까지의 성적이 남는다.
+    """
+
+    def __init__(self, trial):
+        self.trial = trial
+
+    def on_validation_end(self, trainer, pl_module):
+        report = getattr(pl_module, "last_report", None)
+        if not report:
+            return
+        packed = {}
+        for name, s in report.items():
+            packed[name] = {k: _jsonable(s[k]) for k in METRICS_TO_KEEP if k in s}
+            loss = float(s.get("loss", float("nan")))
+            packed[name]["loss"] = loss if math.isfinite(loss) else None
+            packed[name]["n"] = int(s.get("n", 0))
+        self.trial.set_user_attr(f"epoch{trainer.current_epoch}", packed)
+
+
 class _FallbackPruningCallback(Callback):
     """공식 통합 패키지가 없을 때 쓰는 최소 구현.
 
@@ -48,7 +85,7 @@ class _FallbackPruningCallback(Callback):
     지금까지의 중앙값보다 나쁘면 그 시도를 중간에 끊는다.
     """
 
-    def __init__(self, trial, monitor: str = "val_ic"):
+    def __init__(self, trial, monitor: str = "val_r2"):
         self.trial = trial
         self.monitor = monitor
 
@@ -65,7 +102,7 @@ class _FallbackPruningCallback(Callback):
                 f"({self.monitor}={float(value):.5f})")
 
 
-def make_pruning_callback(trial, monitor: str = "val_ic"):
+def make_pruning_callback(trial, monitor: str = "val_r2"):
     """가지치기 콜백. 공식 통합 패키지가 있으면 그걸 쓴다.
 
         pip install optuna-integration
@@ -106,8 +143,8 @@ def thin(ds, stride):
 # 실측 기준값. hidden_dim 40 / batch 1024 로 2,428 배치를 404초에 처리했고
 # (초당 6,158 샘플), 검증은 배치당 약 4배 빨랐다. 탐색 범위 중앙인 hidden 128
 # 은 파라미터가 2.8배라 보수적으로 3배 느리다고 본다.
-# 상수 예측 등으로 IC 가 정의되지 않을 때 줄 점수. 실제 IC 는 -1 아래로
-# 내려갈 수 없으므로 어떤 정상 시도보다도 나쁘다.
+# 상수 예측 등으로 지표가 정의되지 않을 때 줄 점수. 보정 후 R2 는 0 아래로
+# 내려가지 않으므로 -1 은 어떤 정상 시도보다도 나쁘다.
 BAD_SCORE = -1.0
 
 TRAIN_SAMPLES_PER_SEC = 2_000
@@ -207,8 +244,8 @@ def main() -> int:
         trainer = Trainer(
             accelerator="gpu" if torch.cuda.is_available() else "cpu",
             max_epochs=args.max_epochs,
-            callbacks=[pruner_cb,
-                       EarlyStopping(monitor="val_ic", mode="max", patience=1)],
+            callbacks=[_ReportRecorder(trial), pruner_cb,
+                       EarlyStopping(monitor="val_r2", mode="max", patience=1)],
             num_sanity_val_steps=0,
             limit_train_batches=args.limit_train_batches,
             limit_val_batches=args.limit_val_batches,
@@ -220,16 +257,18 @@ def main() -> int:
                     make_loader(train_ds, batch, True, args.workers),
                     make_loader(val_ds, batch, False, args.workers))
 
-        # 채점은 IC 로 한다.
-        #  - 학습 손실로 채점하면 huber 가 mse 보다 항상 작은 값을 내서
-        #    (실측 2.08 대 20.80) 성능과 무관하게 huber 만 뽑힌다.
-        #  - val_mse 로 채점하면 반대로 mse 로 학습한 쪽이 유리하다. 자기가
-        #    최적화한 지표로 채점받기 때문이다.
-        #  - IC 는 어느 손실로 학습했든 공평하고, R2 <= IC^2 이므로 R2 의
-        #    천장을 직접 올린다. 크기는 학습 후 배율 보정으로 맞춘다.
-        value = trainer.callback_metrics.get("val_ic")
+        # 채점은 R2 로 한다. 목표가 가격 회귀 예측이므로 회귀 성적이 기준이다.
+        #
+        # 다만 **배율 보정 후** R2 를 쓴다. 보정 전 R2 는 출력 크기가 어긋난
+        # 만큼 깎이는데, 그건 학습 후 배율 하나로 고쳐지는 문제다. 보정 전
+        # 값으로 채점하면 신호가 많은 설정이 아니라 크기가 우연히 맞은 설정이
+        # 뽑힌다. 보정 후 R2 는 이 설정이 실제로 낼 수 있는 R2 다.
+        #
+        # 학습 손실로 채점하면 안 되는 이유도 같다 — huber 가 mse 보다 항상
+        # 작은 값을 내서 (실측 2.08 대 20.80) 성능과 무관하게 huber 만 뽑힌다.
+        value = trainer.callback_metrics.get("val_r2")
         if value is None or not math.isfinite(float(value)):
-            # 예측이 상수로 무너지면 상관계수가 정의되지 않아 NaN 이 된다.
+            # 예측이 상수로 무너지면 배율도 상관계수도 정의되지 않는다.
             # 실측: weight_decay 8.6e-3 이 모델을 눌러 이 상태를 만들었다.
             # NaN 을 그대로 돌려주면 Optuna 가 시도를 FAIL 로 버리고 아무것도
             # 배우지 못해 같은 영역을 다시 뽑는다. 나쁜 점수로 기록해야
@@ -243,11 +282,23 @@ def main() -> int:
         study_name=args.study,
         storage=args.storage,
         load_if_exists=bool(args.storage),
-        direction="maximize",   # IC 는 클수록 좋다
-        sampler=optuna.samplers.TPESampler(seed=1),
+        direction="maximize",   # R2 는 클수록 좋다
         # 3 epoch 까지는 지켜보고, 그 뒤로 중앙값보다 나쁘면 끊는다
         pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=2),
     )
+
+    # 시드를 기존 시도 수만큼 밀어준다.
+    #
+    # TPE 는 초반 10회를 무작위로 뽑는데, 시드가 고정이면 그 순서가 매번 같다.
+    # 중단 후 이어받으면 탐색기는 처음부터 다시 시작하므로 이미 돌린 설정을
+    # 그대로 다시 뽑는다. 실제로 재시작 한 번에 2회를 헛돌았다
+    # (trial 0≡4, 1≡5). 새 탐색은 여전히 시드 1 로 재현된다.
+    n_existing = len(study.trials)
+    study.sampler = optuna.samplers.TPESampler(seed=1 + n_existing)
+    if n_existing:
+        print(f"기존 시도 {n_existing}회를 이어받는다 "
+              f"(탐색 시드 {1 + n_existing} — 중복 방지)")
+
     study.optimize(objective, n_trials=args.trials, catch=(RuntimeError,))
 
     print("\n" + "=" * 60)

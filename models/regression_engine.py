@@ -202,6 +202,8 @@ class RegressionEngine(LightningModule):
                      add_dataloader_idx=False)
             self.log(f"{stage}_dir/{name}", float(np.nanmean(s["dir_acc"])),
                      add_dataloader_idx=False)
+            self.log(f"{stage}_r2/{name}", float(np.nanmean(s["r2_cal"])),
+                     add_dataloader_idx=False)
             # 학습에 쓴 손실함수와 무관한 지표. huber 와 mse 는 같은 예측에도
             # 값이 10배 다르게 나오므로, 설정끼리 비교하려면 공통 자가 필요하다.
             self.log(f"{stage}_mse/{name}", float(np.nanmean(s["mse"])) * 1e8,
@@ -229,6 +231,12 @@ class RegressionEngine(LightningModule):
                  add_dataloader_idx=False)
         self.log(f"{stage}_ic", float(np.nanmean(primary["ic"])),
                  add_dataloader_idx=False)
+        # 회귀 성적의 본 지표. 보정 전은 출력 크기가 어긋난 만큼 깎이므로
+        # 설정끼리 비교할 때는 보정 후를 쓴다 (utils.metrics.r2_calibrated).
+        self.log(f"{stage}_r2_raw", float(np.nanmean(primary["r2"])),
+                 add_dataloader_idx=False)
+        self.log(f"{stage}_r2", float(np.nanmean(primary["r2_cal"])),
+                 prog_bar=True, add_dataloader_idx=False)
 
         self._print_report(stage, report)
         self.last_report = report

@@ -38,7 +38,11 @@ from models.regression_engine import load_model_from_checkpoint  # noqa: E402
 from preprocessing.ofi_dataset import load_normalizer, split_dates  # noqa: E402
 from scripts.backtest import predict_day                       # noqa: E402
 from scripts.download_data import FILE_IDS, WEEKDAYS           # noqa: E402
-from utils.metrics import information_coefficient, r2          # noqa: E402
+from utils.metrics import (                                    # noqa: E402
+    fit_scale,
+    information_coefficient,
+    r2,
+)
 
 
 def gather(model, cache, symbols, dates, norm, device):
@@ -56,27 +60,6 @@ def gather(model, cache, symbols, dates, norm, device):
     if not preds:
         return None, None
     return np.concatenate(preds), np.concatenate(targets)
-
-
-def fit_scale(pred, target, with_intercept=False):
-    """horizon 마다 최소제곱 배율(과 절편). pred*alpha + beta 가 target 에 가장 가깝게."""
-    H = pred.shape[1]
-    alpha = np.ones(H)
-    beta = np.zeros(H)
-    for j in range(H):
-        p, t = pred[:, j].astype(np.float64), target[:, j].astype(np.float64)
-        m = np.isfinite(p) & np.isfinite(t)
-        p, t = p[m], t[m]
-        if p.size < 10 or p.std() == 0:
-            continue
-        if with_intercept:
-            A = np.vstack([p, np.ones_like(p)]).T
-            sol, *_ = np.linalg.lstsq(A, t, rcond=None)
-            alpha[j], beta[j] = sol
-        else:
-            denom = float(np.dot(p, p))
-            alpha[j] = float(np.dot(p, t) / denom) if denom > 0 else 1.0
-    return alpha, beta
 
 
 def report(pred, target, alpha, beta, title):

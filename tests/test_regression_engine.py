@@ -165,20 +165,80 @@ def test_mse_metric_is_the_same_whatever_loss_trained_it():
     assert np.isfinite(a).all() and (a > 0).all()
 
 
-def test_tune_scores_on_ic_not_on_a_training_loss():
-    """채점 기준이 손실이 아니라 IC 여야 한다.
-
-    학습 손실로 채점하면 huber 가 늘 이기고, val_mse 로 채점하면 mse 로 학습한
-    쪽이 이긴다. 둘 다 자기가 최적화한 지표로 채점받는 셈이다. IC 는 어느
-    손실로 학습했든 공평하다.
-    """
+def _tune_src():
     import io as _io
     import os as _os
-    src = _io.open(_os.path.join(_os.path.dirname(_os.path.dirname(
+    return _io.open(_os.path.join(_os.path.dirname(_os.path.dirname(
         _os.path.abspath(__file__))), "scripts", "tune.py"), encoding="utf-8").read()
-    assert 'callback_metrics.get("val_ic")' in src
+
+
+def test_tune_scores_on_r2_not_on_a_training_loss():
+    """목표가 가격 회귀 예측이므로 채점 기준은 R2 다.
+
+    학습 손실로 채점하면 huber 가 늘 이기고, val_mse 로 채점하면 mse 로 학습한
+    쪽이 이긴다. 둘 다 자기가 최적화한 지표로 채점받는 셈이다.
+    """
+    src = _tune_src()
+    assert 'callback_metrics.get("val_r2")' in src
     assert 'callback_metrics.get("val_loss")' not in src
-    assert 'direction="maximize"' in src, "IC 는 클수록 좋다"
+    assert 'callback_metrics.get("val_ic")' not in src
+    assert 'direction="maximize"' in src, "R2 는 클수록 좋다"
+
+
+def test_search_keeps_every_metric_not_just_the_score():
+    """채점값 하나만 남기면 다른 지표를 보려고 전부 다시 학습해야 한다.
+
+    실제로 그 일이 있었다 — R2 를 보려는데 IC 만 저장돼 있었다.
+    """
+    src = _tune_src()
+    assert "set_user_attr" in src, "성적표를 DB 에 남겨야 한다"
+    assert "_ReportRecorder(trial)" in src, "기록 콜백이 실제로 붙어야 한다"
+    for m in ("r2_cal", "r2", "ic", "dir_acc", "mse", "mae"):
+        assert f'"{m}"' in src, f"{m} 도 남겨야 한다"
+
+
+def test_calibrated_r2_does_not_punish_a_wrongly_scaled_model():
+    """보정 전 R2 로 채점하면 신호가 아니라 출력 크기로 순위가 갈린다.
+
+    덜 학습된 모델은 방향을 맞혀도 출력이 너무 커서 R2 가 음수가 된다
+    (실측: 예측이 이론값의 8~48%). 그건 배율 하나로 고쳐지는 문제다.
+    """
+    from utils.metrics import information_coefficient, r2, r2_calibrated
+
+    rng = np.random.default_rng(21)
+    t = rng.normal(scale=2e-4, size=(50_000, 3))
+    signal = t * 0.06 + rng.normal(scale=2e-4, size=t.shape)
+
+    good_scale = signal
+    bad_scale = signal * 9.0            # 신호는 같고 크기만 어긋난 모델
+
+    # 두 모델의 신호량(IC)은 같다 — 배율은 순위를 바꾸지 않는다
+    assert np.allclose(information_coefficient(good_scale, t),
+                       information_coefficient(bad_scale, t))
+
+    assert (r2(bad_scale, t) < r2(good_scale, t)).all(), \
+        "보정 전에는 크기만 어긋나도 크게 깎인다"
+    assert np.allclose(r2_calibrated(bad_scale, t), r2_calibrated(good_scale, t)), \
+        "보정 후에는 같은 신호에 같은 점수가 나와야 한다"
+
+
+def test_engine_logs_r2_for_the_search_to_read():
+    from utils.metrics import summarise
+    src = _io_read("models/regression_engine.py")
+    assert 'f"{stage}_r2"' in src, "탐색이 읽을 val_r2 를 기록해야 한다"
+    assert 'primary["r2_cal"]' in src, "보정 후 R2 를 기록해야 한다"
+    assert 'f"{stage}_r2_raw"' in src, "보정 전 값도 함께 남긴다"
+
+    s = summarise(np.random.default_rng(3).normal(size=(500, OUT)),
+                  np.random.default_rng(4).normal(size=(500, OUT)))
+    assert "r2_cal" in s and s["r2_cal"].shape == (OUT,)
+
+
+def _io_read(rel):
+    import io as _io
+    import os as _os
+    return _io.open(_os.path.join(_os.path.dirname(_os.path.dirname(
+        _os.path.abspath(__file__))), *rel.split("/")), encoding="utf-8").read()
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +280,38 @@ def test_beta_is_ignored_for_mse():
     e = RegressionEngine(model=MLPLOB(32, 2, SEQ, FEAT, "OFI"),
                          loss_type="mse", huber_beta=7.0)
     assert isinstance(e.criterion, nn.MSELoss)
+
+
+def test_resumed_search_does_not_replay_the_same_random_trials():
+    """이어받기 시 이미 돌린 설정을 다시 뽑으면 안 된다.
+
+    TPE 는 초반을 무작위로 뽑는데 시드가 고정이면 그 순서가 매번 같다.
+    중단 후 이어받으면 탐색기가 처음부터 시작해 같은 설정을 또 돌린다.
+    실측으로 재시작 한 번에 2회(trial 0≡4, 1≡5)를 헛돌았다.
+    """
+    import io as _io
+    import os as _os
+
+    src = _io.open(_os.path.join(_os.path.dirname(_os.path.dirname(
+        _os.path.abspath(__file__))), "scripts", "tune.py"), encoding="utf-8").read()
+    assert "TPESampler(seed=1)" not in src, \
+        "시드를 고정하면 이어받을 때마다 같은 설정을 다시 뽑는다"
+    assert "seed=1 + n_existing" in src
+    assert "len(study.trials)" in src
+
+    # 시드가 다르면 실제로 다른 값을 뽑는지 확인한다
+    optuna = pytest.importorskip("optuna")
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    def first_draws(seed, n=6):
+        study = optuna.create_study(sampler=optuna.samplers.TPESampler(seed=seed))
+        study.optimize(lambda t: t.suggest_float("lr", 1e-5, 1e-2, log=True),
+                       n_trials=n)
+        return [t.params["lr"] for t in study.trials]
+
+    assert first_draws(1) == first_draws(1), "같은 시드는 재현돼야 한다"
+    assert first_draws(1) != first_draws(1 + 6), \
+        "시드를 밀었는데 같은 값이 나오면 중복 방지가 안 된 것이다"
 
 
 def test_collapsed_prediction_is_scored_bad_not_failed():
