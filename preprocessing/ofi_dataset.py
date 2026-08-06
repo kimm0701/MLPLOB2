@@ -28,7 +28,8 @@ class OFIWindowDataset(Dataset):
     """하나의 (종목, 날짜) 에 대한 슬라이딩 윈도우 Dataset."""
 
     def __init__(self, features, targets, indices, seq_len: int = spec.SEQ_LEN,
-                 symbol: str = "", date: str = "", center=None, scale=None):
+                 symbol: str = "", date: str = "", center=None, scale=None,
+                 target_scale=None, target_clip=None):
         self.features = features          # [K, 22]
         self.targets = targets            # [K, 10]
         self.indices = np.asarray(indices, dtype=np.int64)
@@ -39,6 +40,15 @@ class OFIWindowDataset(Dataset):
         # 껐다 켠 비교와 종목 추가가 재전처리 없이 가능하게 한다.
         self.center = None if center is None else np.asarray(center, np.float32)
         self.scale = None if scale is None else np.asarray(scale, np.float32)
+
+        # 정답 정규화 (Kolm et al. 2023 §3.2.2). 나눗셈만 하고 평균은 빼지 않는다.
+        self.target_scale = (None if target_scale is None
+                             else np.asarray(target_scale, np.float32))
+        # winsorize 경계. **학습 구간에만** 준다. 검증·시험에서 자르면 문제
+        # 자체가 쉬워져서 성적이 부풀려지므로, 평가는 자르지 않은 정답으로 한다.
+        self.target_clip = (None if target_clip is None
+                            else (np.asarray(target_clip[0], np.float32),
+                                  np.asarray(target_clip[1], np.float32)))
 
         if self.indices.size:
             assert self.indices.min() - seq_len + 1 >= 0, "입력 구간이 배열 앞을 벗어난다"
@@ -56,6 +66,10 @@ class OFIWindowDataset(Dataset):
         if self.center is not None:
             x -= self.center
             x /= self.scale
+        if self.target_clip is not None:
+            np.clip(y, self.target_clip[0], self.target_clip[1], out=y)
+        if self.target_scale is not None:
+            y /= self.target_scale
         return torch.from_numpy(x), torch.from_numpy(y)
 
 
@@ -75,7 +89,9 @@ def load_normalizer(cache_dir: str, path: str | None = None) -> dict:
 
 
 def load_day(cache_dir: str, symbol: str, date: str, seq_len: int = spec.SEQ_LEN,
-             mmap: bool = True, norm: dict | None = None) -> OFIWindowDataset | None:
+             mmap: bool = True, norm: dict | None = None,
+             normalize_target: bool = False,
+             winsorize: bool = False) -> OFIWindowDataset | None:
     """전처리해 둔 하루치를 읽어 Dataset 으로 만든다. 없으면 None."""
     base = os.path.join(cache_dir, symbol, date)
     fx, fy, fi = base + "_x.npy", base + "_y.npy", base + "_idx.npy"
@@ -89,7 +105,7 @@ def load_day(cache_dir: str, symbol: str, date: str, seq_len: int = spec.SEQ_LEN
     if idx.size == 0:
         return None
 
-    center = scale = None
+    center = scale = t_scale = t_clip = None
     if norm:
         st = norm.get(symbol)
         if st is None:
@@ -98,18 +114,41 @@ def load_day(cache_dir: str, symbol: str, date: str, seq_len: int = spec.SEQ_LEN
                 f"scripts/fit_normalizer.py --symbols {symbol} 를 실행하세요."
             )
         center, scale = st["center"], st["scale"]
+        if normalize_target:
+            if "target_scale" not in st:
+                raise KeyError(
+                    f"{symbol} 에 정답 기준값이 없습니다. "
+                    "scripts/fit_normalizer.py 를 다시 실행하세요."
+                )
+            t_scale = st["target_scale"]
+            if winsorize:
+                t_clip = (st["target_clip_lo"], st["target_clip_hi"])
 
-    return OFIWindowDataset(x, y, idx, seq_len, symbol, date, center, scale)
+    return OFIWindowDataset(x, y, idx, seq_len, symbol, date, center, scale,
+                            t_scale, t_clip)
+
+
+def target_scales(cache_dir: str, symbols, normalizer_path: str | None = None) -> dict:
+    """종목별 정답 표준편차. 평가 때 예측을 원래 단위로 되돌리는 데 쓴다."""
+    norm = load_normalizer(cache_dir, normalizer_path)
+    return {s: norm[s]["target_scale"] for s in symbols
+            if s in norm and "target_scale" in norm[s]}
 
 
 def build_split(cache_dir: str, symbols, dates, seq_len: int = spec.SEQ_LEN,
                 mmap: bool = True, normalize: bool = True,
-                normalizer_path: str | None = None) -> ConcatDataset:
+                normalizer_path: str | None = None,
+                normalize_target: bool = False,
+                winsorize: bool = False) -> ConcatDataset:
     """여러 종목 x 여러 날짜를 하나의 Dataset 으로 잇는다.
 
     normalize=True 면 종목별 사전 정규화를 적용한다. 깊이 정규화만으로는
     종목 간 스케일이 최대 68배까지 벌어져서, 그대로 합치면 모델이 흐름 패턴
     대신 종목 정체성을 학습한다.
+
+    normalize_target=True 면 정답을 horizon·종목별 표준편차로 나눈다.
+    winsorize=True 는 **학습 구간에서만** 켠다 — 평가 정답을 자르면 문제가
+    쉬워져서 성적이 부풀려진다.
     """
     norm = load_normalizer(cache_dir, normalizer_path) if normalize else {}
     if normalize and not norm:
@@ -117,11 +156,14 @@ def build_split(cache_dir: str, symbols, dates, seq_len: int = spec.SEQ_LEN,
             f"{cache_dir}/normalizer.json 이 없습니다.\n"
             "scripts/fit_normalizer.py 를 먼저 실행하거나 normalize=False 로 끄세요."
         )
+    if winsorize and not normalize_target:
+        raise ValueError("winsorize 는 normalize_target 과 함께 써야 합니다")
 
     parts = []
     for sym in symbols:
         for date in dates:
-            ds = load_day(cache_dir, sym, date, seq_len, mmap, norm)
+            ds = load_day(cache_dir, sym, date, seq_len, mmap, norm,
+                          normalize_target, winsorize)
             if ds is not None:
                 parts.append(ds)
     if not parts:

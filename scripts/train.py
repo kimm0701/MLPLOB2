@@ -35,6 +35,7 @@ from models.mlplob import MLPLOB                               # noqa: E402
 from models.regression_engine import RegressionEngine          # noqa: E402
 from preprocessing.ofi_dataset import (                        # noqa: E402
     build_split,
+    target_scales,
     describe,
     split_dates,
 )
@@ -79,8 +80,9 @@ def build_args():
                     default=spec.LOSS_TYPE, choices=["mse", "huber"])
     ap.add_argument("--weight-decay", type=float, default=0.0)
 
-    ap.add_argument("--max-epochs", type=int, default=10)
-    ap.add_argument("--patience", type=int, default=2)
+    # 논문(Kolm et al. 2023, Table 3)과 동일: 50 epoch, 조기종료 patience 5.
+    ap.add_argument("--max-epochs", type=int, default=50)
+    ap.add_argument("--patience", type=int, default=5)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--stride", type=int, default=5,
                     help="학습 샘플 간격. 5 면 0.25초마다 하나. 이웃 샘플은 "
@@ -92,6 +94,13 @@ def build_args():
                     help="빠른 점검용. 1.0 미만이면 검증을 일부만 돌린다")
     ap.add_argument("--limit-test-batches", type=float, default=1.0)
     ap.add_argument("--ckpt-dir", default=None)
+    # 정답 정규화 (논문 §3.2.2). 학습 정답만 자르고 평가 정답은 원본을 쓴다 —
+    # 평가까지 자르면 문제가 쉬워져서 성적이 부풀려진다.
+    ap.add_argument("--normalize-target", action="store_true",
+                    help="정답을 종목·horizon 별 표준편차로 나눈다")
+    ap.add_argument("--winsorize", action="store_true",
+                    help="학습 정답의 상하위 0.5%%를 경계값으로 자른다 "
+                         "(--normalize-target 필요). 평가 정답은 자르지 않는다")
     ap.add_argument("--no-normalize", action="store_true",
                     help="종목별 사전 정규화를 끄고 비교해 볼 때")
     ap.add_argument("--seed", type=int, default=1)
@@ -126,8 +135,10 @@ def main() -> int:
         print(f"제외 종목 {args.held_out} — 학습에 쓰지 않고 시험만 한다")
     print(f"종목별 사전 정규화: {'켜짐' if normalize else '꺼짐'}\n")
 
-    kw = dict(normalize=normalize)
-    train_ds = thin(build_split(args.cache, train_syms, train_dates, **kw), args.stride)
+    kw = dict(normalize=normalize, normalize_target=args.normalize_target)
+    # 자르기는 학습에만 적용한다
+    train_ds = thin(build_split(args.cache, train_syms, train_dates,
+                                winsorize=args.winsorize, **kw), args.stride)
     val_all = build_split(args.cache, train_syms, val_dates, **kw)
     print(f"학습셋   {describe(train_ds)}   (간격 {args.stride})")
     print(f"검증셋   {describe(val_all)}\n")
@@ -170,6 +181,8 @@ def main() -> int:
         eval_names=val_names,
         ckpt_dir=ckpt_dir,
         model_config=model_config,
+        target_scale_by_name=(target_scales(args.cache, test_names)
+                              if args.normalize_target else None),
     )
 
     trainer = Trainer(

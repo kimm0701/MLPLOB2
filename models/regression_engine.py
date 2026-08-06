@@ -111,6 +111,7 @@ class RegressionEngine(LightningModule):
         model_config: dict | None = None,
         pooled_name: str | None = "all",
         huber_beta: float = 1.0,
+        target_scale_by_name: dict | None = None,
     ):
         super().__init__()
         self.model = model
@@ -128,6 +129,10 @@ class RegressionEngine(LightningModule):
         self.pooled_name = pooled_name
         self.ckpt_dir = ckpt_dir
         self.horizons = list(horizons)
+        # 종목별 정답 표준편차 (소수 단위). 있으면 정답이 이미 표준화된 것이므로
+        # 손실에 추가 배율을 걸지 않고, 지표 계산 전에 곱해서 되돌린다.
+        self.target_scale_by_name = dict(target_scale_by_name or {})
+        self.loss_scale = 1.0 if self.target_scale_by_name else TARGET_SCALE
 
         self.criterion = build_loss(loss_type, huber_beta)
         self.save_hyperparameters(ignore=["model"])
@@ -143,9 +148,14 @@ class RegressionEngine(LightningModule):
     def forward(self, x):
         return self.model(x)
 
-    def loss(self, pred_bp, target):
-        """모델 출력은 bp, 정답은 소수. 정답만 올려서 맞춘다."""
-        return self.criterion(pred_bp, target * TARGET_SCALE)
+    def loss(self, pred, target):
+        """손실은 정답과 같은 단위에서 잰다.
+
+        정답 정규화를 켜면 Dataset 이 이미 표준편차로 나눠서 O(1) 로 주므로
+        추가 배율이 필요 없다. 끄면 정답이 소수 수익률(2e-4 규모)이라 그대로
+        두면 MSE 가 1e-8 이 되어 Adam 의 eps 에 눌린다. 그때만 bp 로 올린다.
+        """
+        return self.criterion(pred, target * self.loss_scale)
 
     # ------------------------------------------------------------------
     def training_step(self, batch, batch_idx):
@@ -167,11 +177,25 @@ class RegressionEngine(LightningModule):
         pred = self(x)
         loss = self.loss(pred, y)
         buf = self._buffers.setdefault(dataloader_idx, {"p": [], "t": [], "l": []})
-        # 지표와 백테스트는 사양대로 소수 수익률을 쓴다
-        buf["p"].append(pred.detach().float().cpu() / TARGET_SCALE)
+        # 여기서는 모델이 낸 그대로 담고, 단위 환원은 _finish_eval 에서 한 번에
+        # 한다. 종목마다 되돌릴 배율이 다르기 때문이다.
+        buf["p"].append(pred.detach().float().cpu())
         buf["t"].append(y.detach().float().cpu())
         buf["l"].append(loss.detach())
         return loss
+
+    def _to_decimal(self, pred, target, name: str):
+        """지표 계산 전에 둘 다 소수 수익률로 되돌린다 (사양 §13).
+
+        정답 정규화를 켰다면 Dataset 이 정답을 그 종목·horizon 의 표준편차로
+        나눠서 줬으므로, 곱해서 되돌린다. **평가 정답은 자르지 않았으므로**
+        되돌린 값이 곧 원본 수익률이다 — 성적이 부풀려지지 않는다.
+        """
+        sc = self.target_scale_by_name.get(name)
+        if sc is not None:
+            s = np.asarray(sc, dtype=np.float64)
+            return pred * s, target * s
+        return pred / TARGET_SCALE, target
 
     def validation_step(self, batch, batch_idx, dataloader_idx: int = 0):
         return self._eval_step(batch, dataloader_idx)
@@ -188,8 +212,9 @@ class RegressionEngine(LightningModule):
         for idx in sorted(self._buffers):
             buf = self._buffers[idx]
             name = self.eval_names[idx] if idx < len(self.eval_names) else f"set{idx}"
-            pred = torch.cat(buf["p"]).numpy()
-            target = torch.cat(buf["t"]).numpy()
+            pred, target = self._to_decimal(
+                torch.cat(buf["p"]).numpy().astype(np.float64),
+                torch.cat(buf["t"]).numpy().astype(np.float64), name)
             mean_loss = torch.stack(buf["l"]).mean().item()
 
             s = summarise(pred, target, self.horizons)

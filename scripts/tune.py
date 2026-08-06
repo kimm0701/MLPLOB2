@@ -37,7 +37,22 @@ from utils.lightning_compat import (                           # noqa: E402
 )
 from models.mlplob import MLPLOB                               # noqa: E402
 from models.regression_engine import RegressionEngine          # noqa: E402
-from preprocessing.ofi_dataset import build_split, split_dates  # noqa: E402
+from preprocessing.ofi_dataset import (                        # noqa: E402
+    build_split,
+    split_dates,
+    target_scales,
+)
+
+
+def _pooled_target_scale(args):
+    """탐색은 종목을 합친 하나의 검증 loader 를 쓴다. 되돌릴 배율은
+    종목별 표준편차의 평균으로 근사한다 — 설정끼리의 상대 비교가
+    목적이라 절대값이 조금 어긋나도 순위는 바뀌지 않는다."""
+    import numpy as _np
+    sc = target_scales(args.cache, args.symbols)
+    if not sc:
+        return None
+    return _np.mean([_np.asarray(v) for v in sc.values()], axis=0).tolist()
 from scripts.download_data import FILE_IDS, WEEKDAYS           # noqa: E402
 
 
@@ -81,8 +96,12 @@ class _ReportRecorder(Callback):
 class _FallbackPruningCallback(Callback):
     """공식 통합 패키지가 없을 때 쓰는 최소 구현.
 
-    하는 일은 공식과 같다 — epoch 마다 검증 손실을 Optuna 에 보고하고,
+    하는 일은 공식과 같다 — epoch 마다 채점값을 Optuna 에 보고하고,
     지금까지의 중앙값보다 나쁘면 그 시도를 중간에 끊는다.
+
+    보고하는 값은 **스터디 방향과 같은 것**이어야 한다. 방향이 maximize 인데
+    손실(낮을수록 좋음)을 보고하면 좋은 시도를 잘라내는 정반대 동작을 한다.
+    학습을 언제 멈출지(EarlyStopping)는 논문대로 검증 손실로 따로 본다.
     """
 
     def __init__(self, trial, monitor: str = "val_r2"):
@@ -186,7 +205,11 @@ def main() -> int:
     ap.add_argument("--n-val", type=int, default=2)
     ap.add_argument("--n-test", type=int, default=2)
     ap.add_argument("--trials", type=int, default=20)
-    ap.add_argument("--max-epochs", type=int, default=3)
+    ap.add_argument("--max-epochs", type=int, default=8)
+    ap.add_argument("--patience", type=int, default=3,
+                    help="탐색 중에는 논문의 5보다 짧게 둔다 — 시도 수를 확보하기 위해")
+    ap.add_argument("--normalize-target", action="store_true")
+    ap.add_argument("--winsorize", action="store_true")
     ap.add_argument("--stride", type=int, default=30,
                     help="탐색 중에는 더 성글게 뽑아 한 시도를 빨리 끝낸다")
     ap.add_argument("--train-days", type=int, default=4,
@@ -216,8 +239,10 @@ def main() -> int:
     print(f"검증 {val_dates}")
     print(f"시험 {test_dates}  <- 탐색에 쓰지 않는다\n")
 
-    train_ds = thin(build_split(args.cache, args.symbols, train_dates), args.stride)
-    val_ds = build_split(args.cache, args.symbols, val_dates)
+    kw = dict(normalize_target=args.normalize_target)
+    train_ds = thin(build_split(args.cache, args.symbols, train_dates,
+                                winsorize=args.winsorize, **kw), args.stride)
+    val_ds = build_split(args.cache, args.symbols, val_dates, **kw)
     print(f"학습 {len(train_ds):,}샘플 (간격 {args.stride})   검증 {len(val_ds):,}샘플\n")
 
     def objective(trial):
@@ -239,13 +264,16 @@ def main() -> int:
         engine = RegressionEngine(model=MLPLOB(**cfg), lr=lr, loss_type=loss,
                                   weight_decay=wd, eval_names=["all"],
                                   model_config=cfg, pooled_name=None,
-                                  huber_beta=beta)
+                                  huber_beta=beta,
+                                  target_scale_by_name=(
+                                      {"all": _pooled_target_scale(args)}
+                                      if args.normalize_target else None))
 
         trainer = Trainer(
             accelerator="gpu" if torch.cuda.is_available() else "cpu",
             max_epochs=args.max_epochs,
             callbacks=[_ReportRecorder(trial), pruner_cb,
-                       EarlyStopping(monitor="val_r2", mode="max", patience=1)],
+                       EarlyStopping(monitor="val_loss", mode="min", patience=args.patience)],
             num_sanity_val_steps=0,
             limit_train_batches=args.limit_train_batches,
             limit_val_batches=args.limit_val_batches,

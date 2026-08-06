@@ -329,3 +329,91 @@ def test_collapsed_prediction_is_scored_bad_not_failed():
         _os.path.abspath(__file__))), "scripts", "tune.py"), encoding="utf-8").read()
     assert "BAD_SCORE = -1.0" in src
     assert "math.isfinite" in src
+
+
+# ---------------------------------------------------------------------------
+# 정답 정규화 (Kolm et al. 2023 §3.2.2)
+# ---------------------------------------------------------------------------
+def test_winsorize_applies_to_training_only_not_evaluation():
+    """평가 정답까지 자르면 문제가 쉬워져서 성적이 부풀려진다."""
+    from preprocessing.ofi_dataset import build_split
+    src = _io_read("preprocessing/ofi_dataset.py")
+    assert "winsorize 는 normalize_target 과 함께 써야" in src
+    with pytest.raises(ValueError, match="normalize_target"):
+        build_split("nonexistent", [], [], normalize=False, winsorize=True)
+
+    src = _io_read("scripts/train.py")
+    # 학습에만 winsorize 를 넘기고 검증·시험 kw 에는 넣지 않는다
+    assert "winsorize=args.winsorize" in src
+    assert src.count("winsorize=args.winsorize") == 1, \
+        "자르기는 학습셋 한 곳에만 적용해야 한다"
+
+
+def test_dataset_divides_target_by_scale_and_clips_in_order():
+    from preprocessing.ofi_dataset import OFIWindowDataset
+
+    feat = np.zeros((30, spec.INPUT_DIM), dtype=np.float32)
+    tgt = np.zeros((30, OUT), dtype=np.float32)
+    tgt[25] = 5.0                                   # 경계 밖 값
+    scale = np.full(OUT, 2.0, dtype=np.float32)
+    clip = (np.full(OUT, -1.0), np.full(OUT, 1.0))
+
+    ds = OFIWindowDataset(feat, tgt, [25], seq_len=4, target_scale=scale,
+                          target_clip=clip)
+    _, y = ds[0]
+    # 먼저 1.0 로 잘리고 그 다음 2.0 으로 나뉜다
+    assert torch.allclose(y, torch.full((OUT,), 0.5)), y
+
+    ds_noclip = OFIWindowDataset(feat, tgt, [25], seq_len=4, target_scale=scale)
+    _, y2 = ds_noclip[0]
+    assert torch.allclose(y2, torch.full((OUT,), 2.5)), "자르지 않으면 5/2 = 2.5"
+
+
+def test_engine_restores_decimal_units_before_scoring():
+    """표준화된 정답으로 학습해도 지표는 원래 수익률 단위로 나와야 한다."""
+    cfg = dict(hidden_dim=32, num_layers=2, seq_size=SEQ,
+               num_features=FEAT, dataset_type="OFI")
+    sc = [2e-4] * OUT
+    e = RegressionEngine(model=MLPLOB(**cfg), eval_names=["AMD"],
+                         pooled_name=None, target_scale_by_name={"AMD": sc})
+
+    assert e.loss_scale == 1.0, "정답이 이미 O(1) 이면 추가 배율을 걸면 안 된다"
+
+    pred = np.full((5, OUT), 0.5)
+    tgt = np.full((5, OUT), 0.5)
+    p2, t2 = e._to_decimal(pred, tgt, "AMD")
+    assert np.allclose(t2, 1e-4), "0.5 x 2e-4 = 1e-4 로 되돌아와야 한다"
+    assert np.allclose(p2, 1e-4)
+
+    # 정규화를 끄면 예전 동작 그대로
+    e0 = RegressionEngine(model=MLPLOB(**cfg))
+    assert e0.loss_scale == TARGET_SCALE
+    p3, t3 = e0._to_decimal(np.full((5, OUT), 2.0), np.full((5, OUT), 2e-4), "all")
+    assert np.allclose(p3, 2e-4) and np.allclose(t3, 2e-4)
+
+
+def test_normalised_targets_make_each_horizon_weigh_the_same():
+    """지금은 10초가 손실의 18.4%, 1초가 1.7% 를 차지한다 (실측).
+    표준편차로 나누면 10개가 균등해진다."""
+    rng = np.random.default_rng(31)
+    sd = np.array([1.70, 2.41, 2.95, 3.39, 3.81, 4.17, 4.52, 4.83, 5.11, 5.41])
+    y = rng.normal(size=(20000, 10)) * sd
+
+    share = (y ** 2).mean(0) / (y ** 2).mean(0).sum()
+    assert share[0] < 0.03 and share[-1] > 0.15, "정규화 전에는 10초가 지배한다"
+
+    share_n = ((y / sd) ** 2).mean(0) / ((y / sd) ** 2).mean(0).sum()
+    assert np.allclose(share_n, 0.1, atol=0.01), "정규화 후에는 10개가 균등하다"
+
+
+def test_paper_settings_are_the_defaults():
+    """Kolm et al. 2023 Table 3 / §3.2.3 과 맞춘다."""
+    src = _tune_src()
+    # 가지치기는 스터디 방향(maximize)과 같은 값을 봐야 한다
+    assert 'monitor: str = "val_r2"' in src
+    assert 'EarlyStopping(monitor="val_loss", mode="min"' in src, \
+        "학습 중단은 논문대로 검증 손실로 본다"
+
+    tr = _io_read("scripts/train.py")
+    assert '"--max-epochs", type=int, default=50' in tr, "논문은 50 epoch"
+    assert '"--patience", type=int, default=5' in tr, "논문은 patience 5"
