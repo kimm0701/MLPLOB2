@@ -418,3 +418,38 @@ def test_paper_settings_are_the_defaults():
     tr = _io_read("scripts/train.py")
     assert '"--max-epochs", type=int, default=50' in tr, "논문은 50 epoch"
     assert '"--patience", type=int, default=5' in tr, "논문은 patience 5"
+
+
+def test_winsorize_must_fail_loudly_when_bounds_are_missing():
+    """조용히 건너뛰면 --winsorize 가 아무 일도 안 한 채 학습이 끝난다.
+
+    실제로 그 일이 있었다 - fit_normalizer 를 다시 안 돌려서 경계값이 없었고,
+    Dataset 이 말없이 통과시켜 winsorize 없이 3 epoch 을 학습했다.
+    """
+    src = _io_read("preprocessing/ofi_dataset.py")
+    assert "raise KeyError(" in src
+    assert "winsorize 경계가 없습니다" in src
+    assert '"target_clip_lo" in norm.get' not in src, \
+        "예전의 조용한 건너뛰기가 남아 있으면 안 된다"
+
+
+def test_winsorize_clips_after_normalising_not_before():
+    """경계는 z 공간 값이다. 나누기 전에 자르면 단위가 안 맞는다.
+
+    예전 코드는 bp 단위 경계에 틱 단위 sigma 를 곱해서 잘랐다 - 차원이
+    맞지 않아 사실상 전부를 잘라내거나 아무것도 안 자르게 된다.
+    """
+    src = _io_read("preprocessing/ofi_dataset.py")
+    i_div = src.index("y = y / denom")
+    i_clip = src.index("np.clip(y, self.target_clip[0]")
+    assert i_div < i_clip, "나눈 뒤에 잘라야 한다"
+    assert "self.target_clip[0] * denom" not in src, "경계에 denom 을 곱하면 안 된다"
+
+
+def test_clip_bounds_come_from_training_days_only():
+    src = _io_read("scripts/make_targets.py")
+    assert "for date in train:" in src
+    i = src.index("winsorize 경계를")
+    seg = src[i:i + 1200]
+    assert "val" not in seg and "test" not in seg, \
+        "경계 계산에 검증·시험 날짜가 섞이면 미래를 본 것이다"

@@ -101,6 +101,8 @@ def build_args():
     ap.add_argument("--winsorize", action="store_true",
                     help="학습 정답의 상하위 0.5%%를 경계값으로 자른다 "
                          "(--normalize-target 필요). 평가 정답은 자르지 않는다")
+    ap.add_argument("--no-rolling", action="store_true",
+                    help="구 방식(bp 정답, 고정 배율)으로 되돌린다")
     ap.add_argument("--no-normalize", action="store_true",
                     help="종목별 사전 정규화를 끄고 비교해 볼 때")
     ap.add_argument("--seed", type=int, default=1)
@@ -135,7 +137,8 @@ def main() -> int:
         print(f"제외 종목 {args.held_out} — 학습에 쓰지 않고 시험만 한다")
     print(f"종목별 사전 정규화: {'켜짐' if normalize else '꺼짐'}\n")
 
-    kw = dict(normalize=normalize, normalize_target=args.normalize_target)
+    kw = dict(normalize=normalize, normalize_target=args.normalize_target,
+              rolling=not args.no_rolling)
     # 자르기는 학습에만 적용한다
     train_ds = thin(build_split(args.cache, train_syms, train_dates,
                                 winsorize=args.winsorize, **kw), args.stride)
@@ -150,11 +153,20 @@ def main() -> int:
                                args.batch_size, False, args.workers)
                    for s in train_syms]
 
+    # 시험셋은 설정이 확정될 때까지 만들지 않는다. 파일이 없으면 조용히
+    # 건너뛴다 - 정책을 코드가 강제하게 두는 편이 낫다.
     test_syms = args.symbols                       # 제외 종목도 시험에는 포함
-    test_names = list(test_syms)
-    test_loaders = [make_loader(build_split(args.cache, [s], test_dates, **kw),
-                                args.batch_size, False, args.workers)
-                    for s in test_syms]
+    test_names, test_loaders = [], []
+    for s_ in test_syms:
+        try:
+            test_loaders.append(make_loader(
+                build_split(args.cache, [s_], test_dates, **kw),
+                args.batch_size, False, args.workers))
+            test_names.append(s_)
+        except FileNotFoundError:
+            pass
+    if not test_loaders:
+        print("시험셋 없음 - 검증셋으로만 학습한다 (의도된 상태)")
 
     model_config = dict(
         hidden_dim=args.hidden_dim,
@@ -183,6 +195,8 @@ def main() -> int:
         model_config=model_config,
         target_scale_by_name=(target_scales(args.cache, test_names)
                               if args.normalize_target else None),
+        # 롤링 경로에서는 배율이 배치에 실려 오므로 종목 상수를 두지 않는다
+        target_normalized=not args.no_rolling,
     )
 
     trainer = Trainer(
@@ -207,8 +221,11 @@ def main() -> int:
     print("\n" + "=" * 60)
     print("최종시험 (여기서 처음이자 마지막으로 시험 날짜를 쓴다)")
     print("=" * 60)
-    engine.eval_names = test_names
-    trainer.test(engine, test_loaders)
+    if test_loaders:
+        engine.eval_names = test_names
+        trainer.test(engine, test_loaders)
+    else:
+        print("시험 단계 생략 - 시험셋 파일을 만들지 않았다 (의도된 상태)")
 
     if engine.best_ckpt_path:
         print(f"\n최고 성적 모델: {engine.best_ckpt_path}")

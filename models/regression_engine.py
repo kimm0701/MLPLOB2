@@ -112,6 +112,7 @@ class RegressionEngine(LightningModule):
         pooled_name: str | None = "all",
         huber_beta: float = 1.0,
         target_scale_by_name: dict | None = None,
+        target_normalized: bool = False,
     ):
         super().__init__()
         self.model = model
@@ -132,7 +133,11 @@ class RegressionEngine(LightningModule):
         # 종목별 정답 표준편차 (소수 단위). 있으면 정답이 이미 표준화된 것이므로
         # 손실에 추가 배율을 걸지 않고, 지표 계산 전에 곱해서 되돌린다.
         self.target_scale_by_name = dict(target_scale_by_name or {})
-        self.loss_scale = 1.0 if self.target_scale_by_name else TARGET_SCALE
+        # 정답이 이미 무차원이면(롤링 정규화) 추가 배율을 걸면 안 된다.
+        # 소수 수익률(2e-4 규모)일 때만 bp 로 올린다 - 그대로 두면 MSE 가
+        # 1e-8 이라 Adam 의 eps 에 눌린다.
+        self.target_normalized = bool(target_normalized or self.target_scale_by_name)
+        self.loss_scale = 1.0 if self.target_normalized else TARGET_SCALE
 
         self.criterion = build_loss(loss_type, huber_beta)
         self.save_hyperparameters(ignore=["model"])

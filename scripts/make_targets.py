@@ -51,6 +51,7 @@ from scripts.download_data import FILE_IDS, WEEKDAYS       # noqa: E402
 HORIZON_MULTIPLES = (1.0, 2.0, 3.0)     # Delta_t 의 배수
 EWMA_HALFLIFE = 12_000                  # 버킷. 50ms x 12000 = 10분
 MIN_SIGMA_PCT = 5.0                     # sigma 하한 (그날 분포의 하위 %)
+WINSOR_PCT = 0.5                        # 학습 정답을 자를 상하위 % (논문과 동일)
 
 
 def infer_tick(cache: str, symbol: str, dates) -> float:
@@ -225,10 +226,34 @@ def main() -> int:
                 vs.append(v)
         lvl = float(np.sqrt(np.mean(vs))) if vs else 1.0
 
+        # winsorize 경계를 **정규화된 z 공간**에서 잡는다. 모델이 실제로 보는
+        # 값이라 "몇 표준편차에서 자른다" 로 해석되고, 틱/bp 같은 단위 혼동이
+        # 원천적으로 없다. 학습 날짜에서만 구한다.
+        zs = []
+        for date in train:
+            b = os.path.join(args.cache, sym, date)
+            if not os.path.exists(b + "_yt.npy"):
+                continue
+            zz = np.load(b + "_yt.npy") / (np.load(b + "_sg.npy")[:, None] * lvl)
+            zs.append(zz)
+        clip_lo = clip_hi = None
+        if zs:
+            z = np.concatenate(zs)
+            ok = np.isfinite(z).all(axis=1)
+            clip_lo, clip_hi = np.percentile(
+                z[ok], [WINSOR_PCT, 100 - WINSOR_PCT], axis=0)
+            keep = 1 - np.clip(z[ok], clip_lo, clip_hi).var(0) / z[ok].var(0)
+            print(f"   winsorize {WINSOR_PCT}%  경계 "
+                  f"{np.round(clip_lo, 2).tolist()} ~ {np.round(clip_hi, 2).tolist()}"
+                  f"   분산 {np.round(keep * 100, 1).tolist()}% 제거")
+
         meta[sym] = dict(tick=tick, delta_t_sec=dt,
                          horizon_multiples=list(HORIZON_MULTIPLES),
                          horizon_buckets=hb, halflife=args.halflife,
-                         level=lvl, fitted_on=list(train))
+                         level=lvl, fitted_on=list(train),
+                         winsor_pct=WINSOR_PCT,
+                         clip_lo=None if clip_lo is None else clip_lo.tolist(),
+                         clip_hi=None if clip_hi is None else clip_hi.tolist())
         print(f"   종목 수준 보정 {lvl:.4f}  (1Dt 분산을 정확히 1 로 맞춤)")
         print(f"   {made}일 저장\n")
 

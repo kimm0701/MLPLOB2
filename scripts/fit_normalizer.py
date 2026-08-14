@@ -124,7 +124,7 @@ def fit_symbol(cache: str, symbol: str, train_dates, max_rows: int = 2_000_000):
     raw_scale = (hi - lo) / RANGE_TO_SIGMA
     scale = np.maximum(raw_scale, MIN_SCALE)
 
-    degenerate = [spec.FEATURE_NAMES[j] for j in np.flatnonzero(raw_scale <= MIN_SCALE)]
+    degenerate = [spec.OF_FEATURE_NAMES[j] for j in np.flatnonzero(raw_scale <= MIN_SCALE)]
 
     return dict(
         center=center.tolist(),
@@ -196,7 +196,7 @@ def main() -> int:
         return 1
 
     payload = dict(
-        feature_names=spec.FEATURE_NAMES,
+        feature_names=spec.OF_FEATURE_NAMES,
         method="p1_p99_range",
         range_to_sigma=RANGE_TO_SIGMA,
         symbols=stats,

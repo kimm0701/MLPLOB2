@@ -80,10 +80,9 @@ class OFIWindowDataset(Dataset):
             # 틱 단위 정답 -> 무차원.  sigma 는 인과적(과거만 봄), level 은
             # 학습 구간에서 구한 종목 상수.
             denom = float(self.sigma[k]) * self.level
-            if self.target_clip is not None:              # 학습에만 적용
-                np.clip(y, self.target_clip[0] * denom,
-                        self.target_clip[1] * denom, out=y)
             y = y / denom
+            if self.target_clip is not None:          # 학습에만 적용
+                np.clip(y, self.target_clip[0], self.target_clip[1], out=y)
             # 예측을 원래 수익률로 되돌릴 배율:  z * scale = 소수 수익률
             scale = np.float32(denom * self.tick / max(float(self.price[k]), 1e-9))
             return (torch.from_numpy(x), torch.from_numpy(y),
@@ -103,7 +102,9 @@ def load_normalizer(cache_dir: str, path: str | None = None) -> dict:
         return {}
     with open(path, encoding="utf-8") as fh:
         payload = json.load(fh)
-    if payload.get("feature_names") != list(spec.FEATURE_NAMES):
+    # 정규화 대상은 주문흐름 22개뿐이다. 상태 변수 2개는 일부러 제외하므로
+    # 기준값 파일에도 들어 있지 않다.
+    if payload.get("feature_names") != list(spec.OF_FEATURE_NAMES):
         raise ValueError(
             f"{path} 의 특징 순서가 현재 사양과 다릅니다. "
             "fit_normalizer.py 를 다시 실행하세요."
@@ -154,10 +155,15 @@ def load_day(cache_dir: str, symbol: str, date: str, seq_len: int = spec.SEQ_LEN
                 raise KeyError(f"{symbol} 의 정규화 기준값이 없습니다.")
             center, scale = sy["center"], sy["scale"]
         clip = None
-        if winsorize and norm and "target_clip_lo" in norm.get(symbol, {}):
-            sy = norm[symbol]
-            clip = (sy["target_clip_lo"][:spec.OUTPUT_DIM],
-                    sy["target_clip_hi"][:spec.OUTPUT_DIM])
+        if winsorize:
+            # 경계는 targets.json 에 z 공간으로 들어 있다. 없으면 **에러를
+            # 낸다** - 예전에 조용히 건너뛰어서 --winsorize 가 아무 일도 하지
+            # 않은 채 학습이 끝난 적이 있다.
+            if st.get("clip_lo") is None:
+                raise KeyError(
+                    f"{symbol} 의 winsorize 경계가 없습니다. "
+                    "scripts/make_targets.py 를 다시 실행하세요.")
+            clip = (st["clip_lo"], st["clip_hi"])
         return OFIWindowDataset(
             x, np.load(base + "_yt.npy", mmap_mode=mode), idx, seq_len,
             symbol, date, center, scale, None, clip,

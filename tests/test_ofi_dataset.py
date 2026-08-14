@@ -112,9 +112,9 @@ def _write_day(root, sym, date, fill, K=800):
 def _write_normalizer(root, table):
     import json
     payload = {
-        "feature_names": list(spec.FEATURE_NAMES),
+        "feature_names": list(spec.OF_FEATURE_NAMES),
         "method": "median_iqr",
-        "symbols": {s: {"center": [c] * FEAT, "scale": [sc] * FEAT}
+        "symbols": {s: {"center": [c] * spec.OF_DIM, "scale": [sc] * spec.OF_DIM}
                     for s, (c, sc) in table.items()},
     }
     (root / "normalizer.json").write_text(json.dumps(payload), encoding="utf-8")
