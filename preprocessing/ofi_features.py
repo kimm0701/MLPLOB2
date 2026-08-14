@@ -290,7 +290,7 @@ def build_features(
     features = np.concatenate(
         [norm_bid_of, norm_ask_of] + [c[:, None] for c in ofi_cols], axis=1
     )
-    assert features.shape[1] == spec.INPUT_DIM, features.shape
+    assert features.shape[1] == spec.OF_DIM, features.shape
 
     # ---- §12 미드프라이스 ----
     mid_valid = (best_bid > 0) & (best_ask > 0) & (best_ask >= best_bid)

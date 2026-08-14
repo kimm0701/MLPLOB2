@@ -30,8 +30,8 @@ def test_18_19_sample_shapes(day):
     x, y, idx = day
     ds = OFIWindowDataset(x, y, idx, SEQ)
     xb, yb = ds[0]
-    assert tuple(xb.shape) == (100, 22)
-    assert tuple(yb.shape) == (10,)
+    assert tuple(xb.shape) == (100, spec.INPUT_DIM)
+    assert tuple(yb.shape) == (spec.OUTPUT_DIM,)
     assert xb.dtype == torch.float32 and yb.dtype == torch.float32
 
 
@@ -131,9 +131,10 @@ def test_per_symbol_normalisation_puts_symbols_on_one_scale(tmp_path):
 
     xb, _ = by_sym["BIG"][0]
     xs, _ = by_sym["SML"][0]
-    assert torch.allclose(xb, torch.zeros_like(xb)), "(100-100)/20 = 0"
-    assert torch.allclose(xs, torch.zeros_like(xs)), "(10-10)/2 = 0"
-    assert torch.allclose(xb, xs), "정규화 후 두 종목이 같은 스케일"
+    m = spec.OF_DIM                      # 뒤 2개는 상태 변수라 제외 대상
+    assert torch.allclose(xb[:, :m], torch.zeros_like(xb[:, :m])), "(100-100)/20 = 0"
+    assert torch.allclose(xs[:, :m], torch.zeros_like(xs[:, :m])), "(10-10)/2 = 0"
+    assert torch.allclose(xb[:, :m], xs[:, :m]), "정규화 후 두 종목이 같은 스케일"
 
 
 def test_normalisation_formula(tmp_path):
@@ -141,7 +142,9 @@ def test_normalisation_formula(tmp_path):
     _write_normalizer(tmp_path, {"AAA": (3.0, 2.0)})
     ds = build_split(str(tmp_path), ["AAA"], ["20260101"])
     x, _ = ds[0]
-    assert torch.allclose(x, torch.full_like(x, 2.0)), "(7-3)/2 = 2"
+    m = spec.OF_DIM
+    assert torch.allclose(x[:, :m], torch.full_like(x[:, :m], 2.0)), "(7-3)/2 = 2"
+    assert torch.allclose(x[:, m:], torch.full_like(x[:, m:], 7.0)),         "상태 변수는 손대지 않는다 - 종목별 z-score 를 씌우면 구분이 지워진다"
 
 
 def test_normalisation_can_be_turned_off_for_comparison(tmp_path):

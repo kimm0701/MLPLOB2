@@ -11,12 +11,12 @@ from preprocessing.ofi_labels import (
     valid_sample_indices,
 )
 
-H = spec.TARGET_HORIZON_BUCKETS          # [20, 40, ... 200]
+H = spec.TARGET_HORIZON_BUCKETS          # 구 방식 [20, 40, ... 200]
 
 
 def test_horizon_offsets_are_seconds_times_20():
     assert H == [20, 40, 60, 80, 100, 120, 140, 160, 180, 200]
-    assert len(H) == spec.OUTPUT_DIM == 10
+    assert len(H) == len(spec.LEGACY_HORIZONS_SEC) == 10
 
 
 def test_13_return_formula_and_decimal_form():

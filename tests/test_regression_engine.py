@@ -340,7 +340,8 @@ def test_winsorize_applies_to_training_only_not_evaluation():
     src = _io_read("preprocessing/ofi_dataset.py")
     assert "winsorize 는 normalize_target 과 함께 써야" in src
     with pytest.raises(ValueError, match="normalize_target"):
-        build_split("nonexistent", [], [], normalize=False, winsorize=True)
+        build_split("nonexistent", [], [], normalize=False, winsorize=True,
+                    rolling=False)
 
     src = _io_read("scripts/train.py")
     # 학습에만 winsorize 를 넘기고 검증·시험 kw 에는 넣지 않는다

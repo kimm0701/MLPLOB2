@@ -141,9 +141,9 @@ def test_04_05_06_sides_summed_and_kept_separate():
     assert r.bid_of[1, 0] != r.bid_of[1, 0] + r.ask_of[1, 0]
 
     # 입력 특징에서도 0~9 는 매수, 10~19 는 매도로 분리되어 있어야 한다
-    assert spec.FEATURE_NAMES[:L] == [f"bid_of_l{i}" for i in range(1, L + 1)]
-    assert spec.FEATURE_NAMES[L:2 * L] == [f"ask_of_l{i}" for i in range(1, L + 1)]
-    assert spec.FEATURE_NAMES[2 * L:] == ["ofi_500ms", "ofi_1000ms"]
+    assert spec.OF_FEATURE_NAMES[:L] == [f"bid_of_l{i}" for i in range(1, L + 1)]
+    assert spec.OF_FEATURE_NAMES[L:2 * L] == [f"ask_of_l{i}" for i in range(1, L + 1)]
+    assert spec.OF_FEATURE_NAMES[2 * L:] == ["ofi_500ms", "ofi_1000ms"]
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +306,7 @@ def test_16_not_individually_normalized_then_averaged(stream):
 # §18-17  한 시점 특징 shape == [22]  /  §11 warm-up 처리
 # ---------------------------------------------------------------------------
 def test_17_single_timestep_feature_shape(stream):
-    assert stream.features.shape[1] == spec.INPUT_DIM == 22
+    assert stream.features.shape[1] == spec.OF_DIM == 22
     assert stream.features[0].shape == (22,)
 
 

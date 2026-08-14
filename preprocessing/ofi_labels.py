@@ -18,7 +18,7 @@ import ofi_spec as spec
 
 
 def build_targets(mid: np.ndarray, mid_valid: np.ndarray,
-                  horizon_buckets=tuple(spec.TARGET_HORIZON_BUCKETS)):
+                  horizon_buckets=tuple(spec.TARGET_HORIZON_BUCKETS)):   # 구 방식
     """미드프라이스 배열 -> (targets [K, H], target_valid [K]).
 
     target_valid[k] 는 다음을 모두 만족할 때만 True.

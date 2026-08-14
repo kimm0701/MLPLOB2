@@ -29,7 +29,8 @@ class OFIWindowDataset(Dataset):
 
     def __init__(self, features, targets, indices, seq_len: int = spec.SEQ_LEN,
                  symbol: str = "", date: str = "", center=None, scale=None,
-                 target_scale=None, target_clip=None):
+                 target_scale=None, target_clip=None,
+                 sigma=None, price=None, tick=1.0, level=1.0):
         self.features = features          # [K, 22]
         self.targets = targets            # [K, 10]
         self.indices = np.asarray(indices, dtype=np.int64)
@@ -49,6 +50,11 @@ class OFIWindowDataset(Dataset):
         self.target_clip = (None if target_clip is None
                             else (np.asarray(target_clip[0], np.float32),
                                   np.asarray(target_clip[1], np.float32)))
+        # 롤링 정규화용. sigma 가 있으면 정답은 틱 단위로 들어온 것으로 본다.
+        self.sigma = sigma
+        self.price = price
+        self.tick = float(tick)
+        self.level = float(level)
 
         if self.indices.size:
             assert self.indices.min() - seq_len + 1 >= 0, "입력 구간이 배열 앞을 벗어난다"
@@ -64,8 +70,25 @@ class OFIWindowDataset(Dataset):
         x = np.array(self.features[k - self.seq_len + 1: k + 1], dtype=np.float32)
         y = np.array(self.targets[k], dtype=np.float32)
         if self.center is not None:
-            x -= self.center
-            x /= self.scale
+            # 뒤쪽 상태 변수(스프레드·경과시간)는 제외한다. 종목별 z-score 를
+            # 씌우면 종목 간 차이가 정확히 0 으로 지워져 넣은 의미가 없어진다.
+            m = x.shape[1] - spec.STATE_FEATURES
+            x[:, :m] -= self.center[:m]
+            x[:, :m] /= self.scale[:m]
+
+        if self.sigma is not None:
+            # 틱 단위 정답 -> 무차원.  sigma 는 인과적(과거만 봄), level 은
+            # 학습 구간에서 구한 종목 상수.
+            denom = float(self.sigma[k]) * self.level
+            if self.target_clip is not None:              # 학습에만 적용
+                np.clip(y, self.target_clip[0] * denom,
+                        self.target_clip[1] * denom, out=y)
+            y = y / denom
+            # 예측을 원래 수익률로 되돌릴 배율:  z * scale = 소수 수익률
+            scale = np.float32(denom * self.tick / max(float(self.price[k]), 1e-9))
+            return (torch.from_numpy(x), torch.from_numpy(y),
+                    torch.tensor([scale], dtype=torch.float32))
+
         if self.target_clip is not None:
             np.clip(y, self.target_clip[0], self.target_clip[1], out=y)
         if self.target_scale is not None:
@@ -88,12 +111,60 @@ def load_normalizer(cache_dir: str, path: str | None = None) -> dict:
     return payload.get("symbols", {})
 
 
+def load_targets_meta(cache_dir: str) -> dict:
+    """scripts/make_targets.py 가 남긴 종목별 틱·Delta_t·수준 보정."""
+    p = os.path.join(cache_dir, "targets.json")
+    if not os.path.exists(p):
+        return {}
+    with open(p, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
 def load_day(cache_dir: str, symbol: str, date: str, seq_len: int = spec.SEQ_LEN,
              mmap: bool = True, norm: dict | None = None,
              normalize_target: bool = False,
-             winsorize: bool = False) -> OFIWindowDataset | None:
-    """전처리해 둔 하루치를 읽어 Dataset 으로 만든다. 없으면 None."""
+             winsorize: bool = False,
+             tmeta: dict | None = None) -> OFIWindowDataset | None:
+    """전처리해 둔 하루치를 읽어 Dataset 으로 만든다. 없으면 None.
+
+    tmeta 가 있으면 새 방식이다 - 입력은 _x2.npy(24개), 정답은 _yt.npy(틱)를
+    _sg.npy(인과적 sigma)로 나눈 무차원 값.
+    """
     base = os.path.join(cache_dir, symbol, date)
+    if tmeta and symbol in tmeta:
+        need = [base + s for s in ("_x2.npy", "_yt.npy", "_sg.npy",
+                                   "_px.npy", "_idx.npy")]
+        if not all(os.path.exists(f) for f in need):
+            return None
+        mode = "r" if mmap else None
+        st = tmeta[symbol]
+        idx = np.load(base + "_idx.npy")
+        if idx.size == 0:
+            return None
+        x = np.load(base + "_x2.npy", mmap_mode=mode)
+        # 마지막 horizon 이 배열 끝을 넘는 지점은 정답이 NaN 이라 제외한다
+        hmax = max(st["horizon_buckets"])
+        idx = idx[idx < x.shape[0] - hmax]
+        if idx.size == 0:
+            return None
+        center = scale = None
+        if norm:
+            sy = norm.get(symbol)
+            if sy is None:
+                raise KeyError(f"{symbol} 의 정규화 기준값이 없습니다.")
+            center, scale = sy["center"], sy["scale"]
+        clip = None
+        if winsorize and norm and "target_clip_lo" in norm.get(symbol, {}):
+            sy = norm[symbol]
+            clip = (sy["target_clip_lo"][:spec.OUTPUT_DIM],
+                    sy["target_clip_hi"][:spec.OUTPUT_DIM])
+        return OFIWindowDataset(
+            x, np.load(base + "_yt.npy", mmap_mode=mode), idx, seq_len,
+            symbol, date, center, scale, None, clip,
+            sigma=np.load(base + "_sg.npy", mmap_mode=mode),
+            price=np.load(base + "_px.npy", mmap_mode=mode)[:, 0],
+            tick=st["tick"], level=st.get("level", 1.0))
+
     fx, fy, fi = base + "_x.npy", base + "_y.npy", base + "_idx.npy"
     if not (os.path.exists(fx) and os.path.exists(fy) and os.path.exists(fi)):
         return None
@@ -139,7 +210,8 @@ def build_split(cache_dir: str, symbols, dates, seq_len: int = spec.SEQ_LEN,
                 mmap: bool = True, normalize: bool = True,
                 normalizer_path: str | None = None,
                 normalize_target: bool = False,
-                winsorize: bool = False) -> ConcatDataset:
+                winsorize: bool = False,
+                rolling: bool = True) -> ConcatDataset:
     """여러 종목 x 여러 날짜를 하나의 Dataset 으로 잇는다.
 
     normalize=True 면 종목별 사전 정규화를 적용한다. 깊이 정규화만으로는
@@ -156,14 +228,15 @@ def build_split(cache_dir: str, symbols, dates, seq_len: int = spec.SEQ_LEN,
             f"{cache_dir}/normalizer.json 이 없습니다.\n"
             "scripts/fit_normalizer.py 를 먼저 실행하거나 normalize=False 로 끄세요."
         )
-    if winsorize and not normalize_target:
+    if winsorize and not normalize_target and not rolling:
         raise ValueError("winsorize 는 normalize_target 과 함께 써야 합니다")
 
+    tmeta = load_targets_meta(cache_dir) if rolling else {}
     parts = []
     for sym in symbols:
         for date in dates:
             ds = load_day(cache_dir, sym, date, seq_len, mmap, norm,
-                          normalize_target, winsorize)
+                          normalize_target, winsorize, tmeta)
             if ds is not None:
                 parts.append(ds)
     if not parts:

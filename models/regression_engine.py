@@ -158,8 +158,15 @@ class RegressionEngine(LightningModule):
         return self.criterion(pred, target * self.loss_scale)
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _unpack(batch):
+        """(x, y) 또는 (x, y, scale). scale 은 예측을 원래 수익률로 되돌릴 배율."""
+        if len(batch) == 3:
+            return batch[0], batch[1], batch[2]
+        return batch[0], batch[1], None
+
     def training_step(self, batch, batch_idx):
-        x, y = batch
+        x, y, _ = self._unpack(batch)
         loss = self.loss(self(x), y)
         self._train_losses.append(loss.detach())
         self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
@@ -173,16 +180,28 @@ class RegressionEngine(LightningModule):
 
     # ------------------------------------------------------------------
     def _eval_step(self, batch, dataloader_idx: int):
-        x, y = batch
+        x, y, scale = self._unpack(batch)
         pred = self(x)
         loss = self.loss(pred, y)
-        buf = self._buffers.setdefault(dataloader_idx, {"p": [], "t": [], "l": []})
+        buf = self._buffers.setdefault(dataloader_idx,
+                                       {"p": [], "t": [], "l": [], "s": []})
         # 여기서는 모델이 낸 그대로 담고, 단위 환원은 _finish_eval 에서 한 번에
-        # 한다. 종목마다 되돌릴 배율이 다르기 때문이다.
+        # 한다. 롤링 정규화에서는 배율이 **표본마다** 다르다.
         buf["p"].append(pred.detach().float().cpu())
         buf["t"].append(y.detach().float().cpu())
         buf["l"].append(loss.detach())
+        if scale is not None:
+            buf["s"].append(scale.detach().float().cpu())
         return loss
+
+    def _to_decimal_rolling(self, pred, target, scale):
+        """표본별 배율로 되돌린다.  z * scale = 소수 수익률.
+
+        scale = sigma * level * tick / price 이고 sigma 는 과거만 보고 만든
+        값이라, 되돌린 정답은 **자르지 않은 원본 수익률**과 정확히 같다.
+        성적이 부풀려지지 않는다.
+        """
+        return pred * scale, target * scale
 
     def _to_decimal(self, pred, target, name: str):
         """지표 계산 전에 둘 다 소수 수익률로 되돌린다 (사양 §13).
@@ -212,9 +231,13 @@ class RegressionEngine(LightningModule):
         for idx in sorted(self._buffers):
             buf = self._buffers[idx]
             name = self.eval_names[idx] if idx < len(self.eval_names) else f"set{idx}"
-            pred, target = self._to_decimal(
-                torch.cat(buf["p"]).numpy().astype(np.float64),
-                torch.cat(buf["t"]).numpy().astype(np.float64), name)
+            p = torch.cat(buf["p"]).numpy().astype(np.float64)
+            t = torch.cat(buf["t"]).numpy().astype(np.float64)
+            if buf.get("s"):
+                sc = torch.cat(buf["s"]).numpy().astype(np.float64)
+                pred, target = self._to_decimal_rolling(p, t, sc)
+            else:
+                pred, target = self._to_decimal(p, t, name)
             mean_loss = torch.stack(buf["l"]).mean().item()
 
             s = summarise(pred, target, self.horizons)

@@ -1,6 +1,6 @@
 """사양 §18 (17~22, 25, 26) + §20-9,10 모델 검증.
 
-입력 [B, 100, 22] -> 출력 [B, 10], 최종 출력 뒤 활성함수 없음, 손실 backward.
+입력 [B, 100, INPUT_DIM] -> 출력 [B, OUTPUT_DIM], 최종 출력 뒤 활성함수 없음, 손실 backward.
 """
 
 import numpy as np
@@ -13,8 +13,8 @@ from models.mlplob import MLPLOB
 
 B = 2
 SEQ = spec.SEQ_LEN          # 100
-FEAT = spec.INPUT_DIM       # 22
-OUT = spec.OUTPUT_DIM       # 10
+FEAT = spec.INPUT_DIM       # 주문흐름 22 + 상태 2
+OUT = spec.OUTPUT_DIM       # Delta_t 배수 3개
 HIDDEN = 40
 LAYERS = 3
 
@@ -36,19 +36,19 @@ def model():
 # ---------------------------------------------------------------------------
 def test_18_single_sequence_shape():
     x = torch.randn(1, SEQ, FEAT)
-    assert x.shape[1:] == (100, 22)
+    assert x.shape[1:] == (100, FEAT)
 
 
 def test_19_20_batch_in_out_shape(model):
     x = torch.randn(B, SEQ, FEAT)
     y = model(x)
-    assert x.shape == (B, 100, 22)
-    assert y.shape == (B, 10), "출력은 horizon 10개"
+    assert x.shape == (B, 100, FEAT)
+    assert y.shape == (B, OUT), f"출력은 horizon {OUT}개"
 
 
-def test_input_projection_accepts_22_not_40(model):
-    """입력 차원이 22로 잡혀 있어야 한다 (기존 40/144 하드코딩 제거 확인)."""
-    assert model.first_layer.in_features == spec.INPUT_DIM == 22
+def test_input_projection_matches_spec_not_hardcoded(model):
+    """입력 차원이 사양을 따라야 한다 (기존 40/144 하드코딩 제거 확인)."""
+    assert model.first_layer.in_features == spec.INPUT_DIM
     assert model.norm_layer.d1 == spec.INPUT_DIM
     assert model.norm_layer.t1 == spec.SEQ_LEN
 
@@ -98,7 +98,7 @@ def test_25_26_loss_shapes_and_backward(model, loss_type, cls):
     target = torch.randn(B, OUT) * 1e-3          # 수익률 스케일
 
     pred = m(x)
-    assert pred.shape == target.shape == (B, 10)
+    assert pred.shape == target.shape == (B, OUT)
 
     criterion = cls()
     loss = criterion(pred, target)
@@ -160,11 +160,11 @@ def test_runs_on_cuda_end_to_end():
 def test_forward_backward_smoke_matches_spec_20_9_10():
     """§20-9,10 이 요구한 최소 실행."""
     m = MLPLOB(HIDDEN, LAYERS, SEQ, FEAT, "OFI")
-    dummy_input = torch.randn(2, 100, 22)
+    dummy_input = torch.randn(2, 100, FEAT)
     out = m(dummy_input)
-    assert tuple(out.shape) == (2, 10)
+    assert tuple(out.shape) == (2, OUT)
 
-    target = torch.randn(2, 10)
+    target = torch.randn(2, OUT)
     loss = nn.MSELoss()(out, target)
     loss.backward()
     assert np.isfinite(loss.item())
