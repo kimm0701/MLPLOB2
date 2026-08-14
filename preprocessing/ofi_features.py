@@ -125,7 +125,10 @@ def event_of_ask(prev_px, prev_qty, cur_px, cur_qty):
 class OFIResult:
     """버킷 단위 산출물. K = 버킷 개수, L = 호가 단계 수."""
 
-    first_bucket: int            # 절대 버킷 인덱스 (= ts_ms // BUCKET_MS)
+    first_bucket: int            # 절대 버킷 인덱스 (= ts_ms // BUCKET_MS). 이벤트
+                                 # 버킷 모드에서는 0 이고 의미가 없다 - ts_ms 를 쓴다.
+    ts_ms: np.ndarray            # [K] 버킷 종료 시각(ms). 이벤트 버킷은 간격이
+                                 # 불규칙하므로 시각을 따로 들고 다녀야 한다.
     bid_of: np.ndarray           # [K, L] 원시 매수 OF (버킷 합산, 정규화 전)
     ask_of: np.ndarray           # [K, L] 원시 매도 OF
     q_bid_end: np.ndarray        # [K, L] 버킷 종료 시점 매수 잔량
@@ -152,6 +155,7 @@ def build_features(
     events,
     levels: int = spec.LEVELS,
     bucket_ms: int = spec.BUCKET_MS,
+    bucket_events: int | None = None,
     depth_window: int = spec.DEPTH_ROLLING_WINDOW,
     ofi_windows=tuple(spec.OFI_WINDOWS),
     eps: float = spec.EPS,
@@ -160,6 +164,19 @@ def build_features(
 
     Parameters
     ----------
+    bucket_events : int | None
+        None 이면 시간 격자(bucket_ms)로 자른다. 정수면 **이벤트 개수**로 자른다 -
+        buckets 하나 = 그 개수만큼의 실제 호가창 갱신.
+
+        시간 격자는 종목마다 정보 밀도가 크게 달라진다. 실측(2026-07-28):
+        버킷당 이벤트가 AMD 0.6 / MRVL 0.5 / META 0.1 건이고, 전부 0 인 버킷이
+        AMD 3.8% / MRVL 1.2% / META 32.7% 였다. META 는 100칸 입력 중 33칸이
+        빈 칸이라 모델이 볼 게 없다. 이벤트로 자르면 빈 칸이 사라지고 종목 간
+        정보 밀도가 맞는다 (Kolm et al. 2023 은 100 건의 호가창 갱신을 입력으로
+        쓴다).
+
+        장부 정정(is_repair)은 개수에 세지 않는다 - 실제 주문흐름이 아니다.
+
     events : iterable of (ts_ms:int, bid_updates, ask_updates[, is_repair])
         `bid_updates` / `ask_updates` 는 (price, qty) 의 순회 가능 객체.
         qty == 0 은 해당 호가 삭제. 이벤트는 **거래소 순서대로** 들어와야 한다.
@@ -183,6 +200,9 @@ def build_features(
 
     first_bucket = None
     cur_k = None
+    ts_rows: list[int] = []
+    seen = 0                     # 이벤트 버킷 모드의 진짜 이벤트 누적 수
+    prev_ts = 0                  # 직전 이벤트 시각 (버킷 종료 시각으로 쓴다)
     acc_bid = np.zeros(levels)
     acc_ask = np.zeros(levels)
     n_ev = 0
@@ -190,9 +210,10 @@ def build_features(
     prev_top = None          # 직전 이벤트 적용 후 상태
     last_top = None          # 직전 버킷 최종 상태 (빈 버킷 forward-fill 용)
 
-    def close_bucket():
+    def close_bucket(ts):
         """현재 버킷을 확정하고 결과 리스트에 추가."""
         bp, bq, ap, aq = last_top
+        ts_rows.append(int(ts))
         bid_of_rows.append(acc_bid.copy())
         ask_of_rows.append(acc_ask.copy())
         qb_rows.append(bq.copy())
@@ -205,7 +226,11 @@ def build_features(
     for event in events:
         ts_ms, bid_updates, ask_updates = event[0], event[1], event[2]
         is_repair = len(event) > 3 and event[3]
-        k = ts_ms // bucket_ms          # 반열린 구간. 경계 시각은 다음 버킷 (§3)
+        if bucket_events:
+            # 정정은 세지 않으므로, 정정만 들어온 구간에서는 k 가 안 움직인다.
+            k = seen // bucket_events
+        else:
+            k = ts_ms // bucket_ms      # 반열린 구간. 경계 시각은 다음 버킷 (§3)
 
         if first_bucket is None:
             first_bucket = k
@@ -216,9 +241,11 @@ def build_features(
                     f"이벤트 시각이 뒤로 갔다: bucket {k} < {cur_k}. "
                     "입력 스트림이 시간순으로 정렬되어 있어야 한다."
                 )
-            close_bucket()
-            # 이벤트가 없는 버킷: 호가창은 forward-fill, OF 는 0 (§3)
+            close_bucket(prev_ts)
+            # 이벤트가 없는 버킷: 호가창은 forward-fill, OF 는 0 (§3).
+            # 이벤트 버킷 모드에서는 k 가 1 씩만 오르므로 이 구간이 돌지 않는다.
             for _ in range(cur_k + 1, k):
+                ts_rows.append(int(prev_ts))
                 bid_of_rows.append(np.zeros(levels))
                 ask_of_rows.append(np.zeros(levels))
                 bp, bq, ap, aq = last_top
@@ -252,10 +279,13 @@ def build_features(
 
         prev_top = cur_top
         last_top = cur_top
+        prev_ts = ts_ms
+        if bucket_events and not is_repair:
+            seen += 1
 
     if first_bucket is None:
         raise ValueError("이벤트가 하나도 없다.")
-    close_bucket()
+    close_bucket(prev_ts)
 
     bid_of = np.asarray(bid_of_rows)                 # [K, L]
     ask_of = np.asarray(ask_of_rows)
@@ -304,7 +334,8 @@ def build_features(
     feature_valid &= mid_valid
 
     return OFIResult(
-        first_bucket=first_bucket,
+        first_bucket=0 if bucket_events else first_bucket,
+        ts_ms=np.asarray(ts_rows, dtype=np.int64),
         bid_of=bid_of,
         ask_of=ask_of,
         q_bid_end=q_bid_end,

@@ -40,10 +40,19 @@ from preprocessing.ofi_labels import build_targets, valid_sample_indices  # noqa
 from scripts.download_data import WEEKDAYS, FILE_IDS, acquire_lock  # noqa: E402
 
 
-def process_day(tar_path: str, out_base: str) -> dict:
+def process_day(tar_path: str, out_base: str,
+                bucket_events: int | None = None) -> dict:
     t0 = time.time()
-    res = build_features(iter_anchored_events(tar_path))
-    targets, target_valid = build_targets(res.mid, res.mid_valid)
+    res = build_features(iter_anchored_events(tar_path),
+                         bucket_events=bucket_events)
+    # 구 방식 정답(_y.npy, bp·1~10초 고정)은 시간 격자에서만 뜻이 있다.
+    # 이벤트 버킷에서는 scripts/make_targets.py 가 이벤트 개수 기준으로 만든다.
+    if bucket_events:
+        targets = np.zeros((res.n_buckets, spec.OUTPUT_DIM), dtype=np.float32)
+        target_valid = np.ones(res.n_buckets, dtype=bool)
+        target_valid[-max(1, bucket_events):] = False
+    else:
+        targets, target_valid = build_targets(res.mid, res.mid_valid)
     idx = valid_sample_indices(res.feature_valid, target_valid, spec.SEQ_LEN)
 
     os.makedirs(os.path.dirname(out_base), exist_ok=True)
@@ -55,6 +64,9 @@ def process_day(tar_path: str, out_base: str) -> dict:
         "_y.npy": targets.astype(np.float32),
         "_px.npy": np.stack([res.mid, res.best_bid, res.best_ask], axis=1).astype(np.float64),
         "_idx.npy": idx.astype(np.int64),
+        # 이벤트 버킷은 간격이 불규칙하므로 시각을 따로 남긴다. 시간 격자
+        # 모드에서도 남겨두면 뒤 단계가 모드를 신경 쓰지 않아도 된다.
+        "_ts.npy": res.ts_ms.astype(np.int64),
     }
     staged = []
     for suffix, arr in payload.items():
@@ -72,7 +84,8 @@ def process_day(tar_path: str, out_base: str) -> dict:
         filled=float((res.n_events > 0).mean()),
         multi=float((res.n_events > 1).mean()),
         repairs=int(res.n_repairs.sum()),
-        hours=res.n_buckets * spec.BUCKET_MS / 3.6e6,
+        hours=(res.ts_ms[-1] - res.ts_ms[0]) / 3.6e6 if res.ts_ms.size
+              else res.n_buckets * spec.BUCKET_MS / 3.6e6,
         secs=time.time() - t0,
     )
 
@@ -84,6 +97,10 @@ def main() -> int:
     ap.add_argument("--symbols", nargs="*", default=sorted(FILE_IDS))
     ap.add_argument("--dates", nargs="*", default=WEEKDAYS)
     ap.add_argument("--force", action="store_true", help="이미 만든 날짜도 다시 만든다")
+    ap.add_argument("--bucket-events", type=int, default=None,
+                    help="버킷을 시간이 아니라 **이벤트 개수**로 자른다. "
+                         "1 이면 호가창 갱신 1건 = 1칸. 시간 격자는 종목마다 "
+                         "빈 칸 비율이 3.8~32.7%%로 크게 달라진다")
     args = ap.parse_args()
 
     jobs = []
@@ -126,7 +143,7 @@ def main() -> int:
             continue
 
         try:
-            st = process_day(tar, out_base)
+            st = process_day(tar, out_base, args.bucket_events)
         except Exception as exc:                                # noqa: BLE001
             print(f"{i:>4} {sym:<6}{date:<10}  실패: {type(exc).__name__}: {exc}",
                   file=sys.stderr, flush=True)

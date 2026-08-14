@@ -341,3 +341,58 @@ def test_events_must_be_time_ordered():
     events = [ev(0, flat(10), flat(10)), ev(200, flat(11), flat(10)), ev(50, flat(12), flat(10))]
     with pytest.raises(ValueError, match="시간순"):
         build_features(events)
+
+
+# ---------------------------------------------------------------------------
+# 이벤트 단위 버킷
+# ---------------------------------------------------------------------------
+def _stream(n=200, seed=0):
+    r = np.random.default_rng(seed)
+    ev, t = [], 1000
+    for _ in range(n):
+        t += int(r.choice([1, 2, 3, 500]))          # 가끔 큰 공백
+        ev.append((t,
+                   [(100.0 - j * 0.01, float(r.integers(1, 9))) for j in range(10)],
+                   [(100.1 + j * 0.01, float(r.integers(1, 9))) for j in range(10)]))
+    return ev
+
+
+def test_event_buckets_have_no_empty_rows():
+    """시간 격자는 종목마다 빈 칸 비율이 3.8~32.7% 로 벌어진다 (실측).
+    이벤트로 자르면 빈 칸이 구조적으로 0 이 된다."""
+    ev = _stream()
+    t = build_features(ev, bucket_ms=spec.BUCKET_MS)
+    e = build_features(ev, bucket_events=1)
+
+    assert (t.n_events == 0).mean() > 0.5, "시간 격자에는 빈 버킷이 많다"
+    assert (e.n_events == 0).mean() == 0.0, "이벤트 버킷에는 빈 칸이 없어야 한다"
+    assert e.n_buckets == len(ev), "이벤트 1건 = 1칸"
+
+
+def test_event_buckets_group_by_count():
+    ev = _stream(200)
+    for k in (1, 5, 10):
+        r = build_features(ev, bucket_events=k)
+        assert r.n_buckets == -(-len(ev) // k), (k, r.n_buckets)
+
+
+def test_event_buckets_carry_timestamps():
+    """이벤트 버킷은 간격이 불규칙하므로 시각을 따로 들고 다녀야 한다."""
+    ev = _stream()
+    r = build_features(ev, bucket_events=1)
+    assert r.ts_ms.size == r.n_buckets
+    assert np.all(np.diff(r.ts_ms) >= 0), "시각은 단조증가해야 한다"
+    assert r.ts_ms[-1] == ev[-1][0]
+
+
+def test_repairs_do_not_advance_the_event_counter():
+    """장부 정정은 실제 주문흐름이 아니므로 칸을 만들지 않는다."""
+    base = [(1000 + i, [(100.0, 5.0)], [(101.0, 5.0)]) for i in range(6)]
+    with_rep = []
+    for i, e in enumerate(base):
+        with_rep.append(e)
+        if i % 2 == 0:
+            with_rep.append((e[0], [(99.0, 0.0)], [], True))     # 정정
+    a = build_features([(t, b, k) for t, b, k in base], bucket_events=2)
+    c = build_features(with_rep, bucket_events=2)
+    assert a.n_buckets == c.n_buckets, "정정이 칸 수를 바꾸면 안 된다"
