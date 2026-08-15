@@ -38,13 +38,24 @@ def test_MLPLOB_과_생성인자가_호환된다():
 
 
 def test_마지막층에_활성함수가_없다():
-    """수익률은 음수도 된다. 출력이 한쪽으로 잘리면 안 된다."""
+    """수익률은 음수도 된다. 출력이 한쪽으로 잘리면 안 된다.
+
+    가중치만 무작위로 흔들고 부호를 보면 불안정하다. 초기 LSTM 은 은닉값이
+    거의 0 이라 출력이 사실상 편향값만 남는데, 편향 4개가 우연히 모두 양수일
+    확률이 1/16 이다. 실제로 그 확률로 실패했다. 그래서 시드를 고정하고,
+    은닉값이 0 이 아니도록 가중치를 함께 키운다.
+    """
+    torch.manual_seed(0)
     m = build_model(cfg())
     with torch.no_grad():
+        for p in m.lstm.parameters():
+            p.uniform_(-0.5, 0.5)
         for p in m.head.parameters():
             p.uniform_(-3, 3)
         out = m(torch.randn(256, SEQ, FEAT))
     assert (out < 0).any() and (out > 0).any(), "부호 양쪽이 다 나와야 한다"
+    # 활성함수가 붙었다면 한쪽이 정확히 0 에 눌리거나 범위가 잘린다
+    assert out.min() < -0.1 and out.max() > 0.1
 
 
 def test_미래를_보지_않는다():
