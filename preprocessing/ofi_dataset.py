@@ -143,9 +143,15 @@ def load_day(cache_dir: str, symbol: str, date: str, seq_len: int = spec.SEQ_LEN
         if idx.size == 0:
             return None
         x = np.load(base + "_x2.npy", mmap_mode=mode)
-        # 마지막 horizon 이 배열 끝을 넘는 지점은 정답이 NaN 이라 제외한다
-        hmax = max(st["horizon_buckets"])
-        idx = idx[idx < x.shape[0] - hmax]
+        yt = np.load(base + "_yt.npy", mmap_mode=mode)
+        # 하루 끝에서는 t+h 초가 배열을 넘어 정답이 NaN 이다. 몇 칸인지는
+        # 이벤트 밀도에 따라 다르므로(초 단위 horizon 을 칸 수로 환산할 수
+        # 없다) **정답을 직접 보고** 걸러낸다. 예전에는 horizon 값을 버킷
+        # 수로 오해해 끝 2 칸만 잘랐고, 남은 NaN 이 학습 손실을 통째로
+        # NaN 으로 만들었다.
+        idx = idx[idx < min(x.shape[0], yt.shape[0])]
+        if idx.size:
+            idx = idx[np.isfinite(np.asarray(yt[idx])).all(axis=1)]
         if idx.size == 0:
             return None
         center = scale = None
@@ -165,7 +171,7 @@ def load_day(cache_dir: str, symbol: str, date: str, seq_len: int = spec.SEQ_LEN
                     "scripts/make_targets.py 를 다시 실행하세요.")
             clip = (st["clip_lo"], st["clip_hi"])
         return OFIWindowDataset(
-            x, np.load(base + "_yt.npy", mmap_mode=mode), idx, seq_len,
+            x, yt, idx, seq_len,
             symbol, date, center, scale, None, clip,
             sigma=np.load(base + "_sg.npy", mmap_mode=mode),
             price=np.load(base + "_px.npy", mmap_mode=mode)[:, 0],

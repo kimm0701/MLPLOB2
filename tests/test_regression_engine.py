@@ -499,3 +499,15 @@ def test_horizons_are_absolute_seconds_shared_by_all_symbols():
     assert spec.OUTPUT_DIM == len(spec.TARGET_HORIZONS_SEC) == 4
     assert "0.55~0.87" in src, "Delta_t 배수가 종목을 균질화하지 못한 실측"
     assert "14.8%" in src, "긴 horizon 이 손실을 가져가는 실측"
+
+
+def test_samples_with_nan_targets_are_dropped():
+    """하루 끝은 t+h 초가 배열을 넘어 정답이 NaN 이다.
+
+    horizon 이 초 단위라 몇 칸인지 이벤트 밀도에 따라 다르다. 예전에는 그 값을
+    버킷 수로 오해해 끝 2 칸만 잘랐고, 남은 NaN 하나가 배치 손실 전체를
+    NaN 으로 만들어 34 분짜리 epoch 을 통째로 버렸다.
+    """
+    src = _io_read("preprocessing/ofi_dataset.py")
+    assert "np.isfinite(np.asarray(yt[idx])).all(axis=1)" in src
+    assert "hmax = max(st[" not in src, "버킷 수로 오해하던 코드가 남아 있다"
