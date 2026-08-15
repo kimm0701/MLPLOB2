@@ -101,7 +101,8 @@ class _FallbackPruningCallback(Callback):
 
     보고하는 값은 **스터디 방향과 같은 것**이어야 한다. 방향이 maximize 인데
     손실(낮을수록 좋음)을 보고하면 좋은 시도를 잘라내는 정반대 동작을 한다.
-    학습을 언제 멈출지(EarlyStopping)는 논문대로 검증 손실로 따로 본다.
+    학습을 언제 멈출지(EarlyStopping)도 같은 지표를 본다 — 중단 기준이 채점
+    기준과 다르면 아직 오르고 있는 시도를 끊고서 점수를 매기게 된다.
     """
 
     def __init__(self, trial, monitor: str = "val_r2"):
@@ -210,6 +211,10 @@ def main() -> int:
                     help="탐색 중에는 논문의 5보다 짧게 둔다 — 시도 수를 확보하기 위해")
     ap.add_argument("--normalize-target", action="store_true")
     ap.add_argument("--winsorize", action="store_true")
+    ap.add_argument("--no-rolling", action="store_true",
+                    help="구 방식(bp 정답, 고정 배율). train.py 와 맞춰야 한다")
+    ap.add_argument("--no-normalize", action="store_true",
+                    help="종목별 사전 정규화를 끈다. train.py 와 맞춰야 한다")
     ap.add_argument("--stride", type=int, default=30,
                     help="탐색 중에는 더 성글게 뽑아 한 시도를 빨리 끝낸다")
     ap.add_argument("--train-days", type=int, default=4,
@@ -248,7 +253,11 @@ def main() -> int:
     print(f"검증 {val_dates}")
     print(f"시험 {test_dates}  <- 탐색에 쓰지 않는다\n")
 
-    kw = dict(normalize_target=args.normalize_target)
+    # train.py 와 **같은** 데이터 경로여야 한다. 탐색이 다른 정답으로 순위를
+    # 매기면 그 결과를 본 학습에 그대로 쓸 수 없다.
+    kw = dict(normalize=not args.no_normalize,
+              normalize_target=args.normalize_target,
+              rolling=not args.no_rolling)
     train_ds = thin(build_split(args.cache, args.symbols, train_dates,
                                 winsorize=args.winsorize, **kw), args.stride)
     val_ds = build_split(args.cache, args.symbols, val_dates, **kw)
@@ -290,9 +299,15 @@ def main() -> int:
                                   weight_decay=wd, eval_names=["all"],
                                   model_config=cfg, pooled_name=None,
                                   huber_beta=beta,
+                                  # 롤링에서는 되돌릴 배율이 표본마다 배치에
+                                  # 실려 오므로 종목 상수를 두지 않는다. 이걸
+                                  # 빼먹으면 loss_scale 이 1e4 로 잡혀서 이미
+                                  # 무차원인 정답에 1e4 를 또 곱한다.
+                                  target_normalized=not args.no_rolling,
                                   target_scale_by_name=(
                                       {"all": _pooled_target_scale(args)}
-                                      if args.normalize_target else None))
+                                      if args.normalize_target and args.no_rolling
+                                      else None))
 
         trainer = Trainer(
             accelerator="gpu" if torch.cuda.is_available() else "cpu",
