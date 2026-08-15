@@ -51,7 +51,7 @@ def load_model_from_checkpoint(path: str, map_location="cpu"):
     객체를 만드는데, 여기서는 model 이 객체라 저장돼 있지 않다. 그래서
     저장해 둔 model_config 로 구조를 다시 세우고 가중치만 얹는다.
     """
-    from models.mlplob import MLPLOB
+    from models.registry import build_model
 
     ck = torch.load(path, map_location=map_location, weights_only=False)
     hp = ck.get("hyper_parameters", {})
@@ -62,7 +62,7 @@ def load_model_from_checkpoint(path: str, map_location="cpu"):
             "저장하기 전 버전입니다. 다시 학습하세요."
         )
 
-    model = MLPLOB(**cfg)
+    model = build_model(cfg)
     state = {k[len("model."):]: v for k, v in ck["state_dict"].items()
              if k.startswith("model.")}
     missing, unexpected = model.load_state_dict(state, strict=False)

@@ -31,7 +31,7 @@ from utils.lightning_compat import (                           # noqa: E402
     seed_everything,
 )
 import ofi_spec as spec                                        # noqa: E402
-from models.mlplob import MLPLOB                               # noqa: E402
+from models.registry import build_model                        # noqa: E402
 from models.regression_engine import RegressionEngine          # noqa: E402
 from preprocessing.ofi_dataset import (                        # noqa: E402
     build_split,
@@ -63,6 +63,15 @@ def build_args():
                     help="이 종목은 학습·검증에서 빼고 시험에만 쓴다")
     ap.add_argument("--n-val", type=int, default=2)
     ap.add_argument("--n-test", type=int, default=2)
+
+    ap.add_argument("--arch", default="mlplob", choices=["mlplob", "lstm"],
+                    help="모델 구조. lstm 은 Kolm 2023 Table 1 구성")
+
+    ap.add_argument("--dropout", type=float, default=0.0,
+                    help="lstm 전용. 층이 2개 이상일 때만 적용된다")
+
+    ap.add_argument("--no-bin", action="store_true",
+                    help="lstm 전용. BiN 적응정규화를 끈다 (논문 원형)")
 
     ap.add_argument("--hidden-dim", type=int, default=128,
                     help="원본 config.py 의 hyperparameters_sweep 값. "
@@ -169,19 +178,23 @@ def main() -> int:
         print("시험셋 없음 - 검증셋으로만 학습한다 (의도된 상태)")
 
     model_config = dict(
+        arch=args.arch,
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
         seq_size=spec.SEQ_LEN,
         num_features=spec.INPUT_DIM,
         dataset_type="OFI",
     )
-    model = MLPLOB(**model_config)
+    if args.arch == "lstm":
+        model_config["dropout"] = args.dropout
+        model_config["use_bin"] = not args.no_bin
+    model = build_model(model_config)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"모델 파라미터 {n_params:,}개\n")
 
     ckpt_dir = args.ckpt_dir or os.path.join(
         cst.DIR_SAVED_MODEL, "MLPLOB_OFI",
-        f"h{args.hidden_dim}_l{args.num_layers}_lr{args.lr}_{args.loss}"
+        f"{args.arch}_h{args.hidden_dim}_l{args.num_layers}_lr{args.lr}_{args.loss}"
         + (f"_no{args.held_out}" if args.held_out else ""))
 
     engine = RegressionEngine(
