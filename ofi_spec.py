@@ -13,16 +13,27 @@ SEQ_LEN = 100                   # 모델 입력 timestep 수 (100 x 50ms = 과�
 DEPTH_ROLLING_WINDOW = 100      # OF/OFI 정규화용 평균잔량 구간 (과거 5초)
 OFI_WINDOWS = [10, 20]          # 최근 0.5초 / 1초
 
-# horizon 은 시계 초가 아니라 **종목별 Delta_t 의 배수**다.
-# Delta_t = 미드가격이 한 번 변하는 데 걸리는 평균 시간 (Kolm et al. 2023 식 16).
-# 시계 초로 고정하면 빠른 종목은 먼 미래를, 느린 종목은 가까운 미래를 보게 되어
-# 같은 출력 칸이 종목마다 다른 뜻이 된다. 실제 버킷 수는 종목마다 다르고
-# data/processed/targets.json 에 들어 있다 (AMD 6/12/18, MRVL 8/16/24,
-# META 13/25/38).
-HORIZON_MULTIPLES = [1, 2, 3]
-TARGET_HORIZONS_SEC = HORIZON_MULTIPLES     # 성적표 라벨 (단위는 Delta_t)
+# horizon 은 **절대 초** 로 고정한다 (종목 공통).
+#
+# Delta_t 배수(종목별 시간 스케일링)를 검토했다가 접었다. 명분이 "종목 간
+# 비교 가능" 인데 실측에서 확인되지 않았다 - 같은 Delta_t 배수에서 종목 간
+# 신호 편차가 0.55~0.87 로, 절대 초(0.78~0.93) 와 비슷하게 컸다. Delta_t 는
+# "가격이 얼마나 자주 변하나" 만 맞추는데 종목 차이는 "얼마나 예측 가능한가"
+# 에서 오기 때문이다 (MRVL 은 Delta_t 가 중간인데 신호가 가장 강했다).
+#
+# 반면 절대 초는 두 가지를 준다.
+#   - 범용 모델의 출력 칸이 종목과 무관하게 같은 뜻을 갖는다. 모델은 지금
+#     보는 게 어느 종목인지 모르므로 이게 중요하다.
+#   - 레이턴시가 절대 시간이라 실행 제약을 직접 통제할 수 있다.
+#
+# 길이는 0.5~2.0 초. 더 긴 horizon 을 넣지 않는 이유는 horizon 별 표준화를
+# 하지 않기 때문이다 - 분산이 horizon 에 정비례해서 긴 쪽이 손실을 가져간다.
+# 실측(AMD): 0.5~3.0 초 6 개면 1 초 이하가 손실의 14.8% 만 받는데, 정작 신호는
+# 0.5 초가 0.0562 로 3.0 초(0.0218) 의 2.6 배다. 0.5~2.0 초 4 개로 줄이면
+# 1 초 이하가 30.7% 를 받는다.
+TARGET_HORIZONS_SEC = [0.5, 1.0, 1.5, 2.0]
 INPUT_DIM = 24                  # 주문흐름 22 + 호가창 상태 2
-OUTPUT_DIM = 3                  # Delta_t 배수별 signed mid-price 변화
+OUTPUT_DIM = 4                  # horizon 별 signed mid-price 변화 (틱)
 EPS = 1e-8
 LOSS_TYPE = "mse"               # "mse" | "huber"
 
@@ -52,4 +63,4 @@ OF_DIM = INPUT_DIM - STATE_FEATURES
 OF_FEATURE_NAMES = FEATURE_NAMES[:OF_DIM]
 
 assert len(FEATURE_NAMES) == INPUT_DIM
-assert len(HORIZON_MULTIPLES) == OUTPUT_DIM
+assert len(TARGET_HORIZONS_SEC) == OUTPUT_DIM

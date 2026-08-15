@@ -453,3 +453,49 @@ def test_clip_bounds_come_from_training_days_only():
     seg = src[i:i + 1200]
     assert "val" not in seg and "test" not in seg, \
         "경계 계산에 검증·시험 날짜가 섞이면 미래를 본 것이다"
+
+
+# ---------------------------------------------------------------------------
+# 절대 초 horizon (이벤트 버킷 위에서)
+# ---------------------------------------------------------------------------
+def test_targets_use_timestamps_not_array_offsets():
+    """이벤트 버킷은 인덱스와 시간이 비례하지 않는다. ts 로 찾아야 한다."""
+    from scripts.make_targets import targets_by_seconds
+
+    mid = np.array([100., 100., 101., 101., 103., 106.])
+    ts = np.array([0, 400, 900, 1300, 2100, 3000], dtype=np.float64)
+    y = targets_by_seconds(mid, ts, 1.0, [0.5, 1.0])
+    # ts=0 에서 0.5초 뒤 = ts>=500 인 첫 시점(900ms) 의 101
+    assert y[0, 0] == pytest.approx(1.0)
+    # ts=400 에서 1.0초 뒤 = ts>=1400 인 첫 시점(2100ms) 의 103
+    assert y[1, 1] == pytest.approx(3.0)
+    assert np.isnan(y[-1, 0]), "하루 끝을 넘으면 NaN"
+
+
+def test_sigma_is_causal_under_event_buckets():
+    """시점 t 의 sigma 는 t 까지 끝난 구간만 쓴다."""
+    from scripts.make_targets import causal_sigma_sec
+
+    rng = np.random.default_rng(3)
+    n = 4000
+    ts = np.cumsum(rng.integers(1, 60, n)).astype(np.float64)
+    mid = 100 + np.cumsum(rng.normal(scale=0.01, size=n))
+
+    s = causal_sigma_sec(mid, ts, 0.01, 0.5, 500)
+    assert s.size == n and np.all(np.isfinite(s)) and np.all(s > 0)
+
+    # 뒤쪽 절반을 통째로 바꿔도 앞쪽 sigma 는 그대로여야 한다
+    mid2 = mid.copy()
+    mid2[n // 2:] += 50.0
+    s2 = causal_sigma_sec(mid2, ts, 0.01, 0.5, 500)
+    assert np.allclose(s[: n // 2 - 1], s2[: n // 2 - 1]), \
+        "미래를 바꿨는데 과거 sigma 가 변하면 누출이다"
+
+
+def test_horizons_are_absolute_seconds_shared_by_all_symbols():
+    """Delta_t 배수를 접은 이유가 주석에 남아 있어야 한다 - 실측 근거."""
+    src = _io_read("ofi_spec.py")
+    assert "TARGET_HORIZONS_SEC = [0.5, 1.0, 1.5, 2.0]" in src
+    assert spec.OUTPUT_DIM == len(spec.TARGET_HORIZONS_SEC) == 4
+    assert "0.55~0.87" in src, "Delta_t 배수가 종목을 균질화하지 못한 실측"
+    assert "14.8%" in src, "긴 horizon 이 손실을 가져가는 실측"

@@ -48,8 +48,14 @@ import ofi_spec as spec                                    # noqa: E402
 from preprocessing.ofi_dataset import split_dates          # noqa: E402
 from scripts.download_data import FILE_IDS, WEEKDAYS       # noqa: E402
 
-HORIZON_MULTIPLES = (1.0, 2.0, 3.0)     # Delta_t 의 배수
-EWMA_HALFLIFE = 12_000                  # 버킷. 50ms x 12000 = 10분
+# horizon 은 ofi_spec.TARGET_HORIZONS_SEC (절대 초) 를 쓴다
+EWMA_HALFLIFE_SEC = 300                 # 초. 종목마다 이벤트 수로 환산한다.
+# 버킷이 시간에서 이벤트로 바뀌면서 "1200 버킷" 이 종목마다 다른 시간이 됐다
+# (AMD 86초 / MRVL 68초 / META 166초). 초로 지정해야 세 종목이 같은 구간을 본다.
+# 후보 비교(구간분산 변동계수, 낮을수록 좋음): 10s 1.220 / 30s 1.118 /
+# 60s 1.069 / 120s 1.044 / 300s 1.021 / 900s 1.007 / 고정 1.892.
+# 120~900초가 평평하므로 가운데인 300초를 쓴다 - 경계값을 피하고, 짧을수록
+# 구간 변화에 빨리 적응한다.
 MIN_SIGMA_PCT = 5.0                     # sigma 하한 (그날 분포의 하위 %)
 WINSOR_PCT = 0.5                        # 학습 정답을 자를 상하위 % (논문과 동일)
 
@@ -99,47 +105,65 @@ def measure_dt(cache: str, symbol: str, dates) -> float:
     return tot * spec.BUCKET_MS / 1000.0 / chg
 
 
-def causal_sigma(mid: np.ndarray, tick: float, halflife: int,
-                 base_h: int) -> np.ndarray:
-    """**1Δt 구간** 수익률(틱)의 인과적 EWMA 표준편차.
+def _apply_floor(sig: np.ndarray, halflife: int) -> np.ndarray:
+    """0 에 가까운 sigma 로 나누는 것을 막되, **미래를 보지 않고** 막는다.
 
-    시점 t 의 값은 t 까지의 수익률만 쓴다. 미래를 보지 않는다.
+    예전에는 하루 전체 sigma 분포의 하위 5% 를 하한으로 썼다. 그 한 숫자에
+    미래가 섞여 있었다 - 단위 테스트가 "뒤쪽 절반을 바꾸면 앞쪽 sigma 가
+    변한다" 로 잡아냈다.
 
-    기준을 1버킷이 아니라 **그 종목의 1Δt(base_h 버킷)** 으로 잡는다.
-    Δt 는 "가격이 변하는 빈도" 로 정의되는데, 한 번 변할 때 몇 틱 움직이는지는
-    종목마다 다르다. 1버킷 기준으로 나누면 같은 1Δt 인데도 종목 간 크기가
-    어긋난다 (실측: META 1Δt 분산 15.8 대 AMD 약 8).
+    이제 하한을 **워밍업 구간(앞쪽 halflife 개)** 에서만 구한다. 그 구간은
+    valid_sample_indices 가 어차피 버리므로, 실제로 쓰는 모든 시점에 대해
+    하한은 과거 정보다.
+    """
+    w = min(max(halflife, 100), sig.size)
+    floor = float(np.percentile(sig[:w], MIN_SIGMA_PCT)) if w else 0.0
+    return np.maximum(sig, max(floor, 1e-6))
 
-        sigma_j = sigma_1dt * sqrt(h_j / base_h)
 
-    이러면 1Δt 에서 종목 간 크기가 맞고, 2Δt·3Δt 는 자연히 2배·3배로 남는다.
-    horizon 간 크기 차이는 실제 구조이므로 일부러 지우지 않는다.
+def targets_by_seconds(mid, ts_ms, tick, horizons_sec):
+    """t 에서 t+h 초 사이의 미드 변화 (틱).  [K, len(horizons_sec)]
 
-    NaN 방어: 미드에 NaN 이 하나라도 있으면 EWMA 가 그 뒤로 전부 NaN 이 된다.
-    수익률 단계에서 0 으로 만들어 흐름을 끊지 않는다.
+    이벤트 버킷이라 배열 인덱스와 시간이 비례하지 않는다. ts_ms 로 시각을
+    찾아야 한다. 하루 끝을 넘어가는 시점은 NaN.
     """
     n = mid.size
+    y = np.full((n, len(horizons_sec)), np.nan, dtype=np.float32)
+    for j, h in enumerate(horizons_sec):
+        k = np.searchsorted(ts_ms, ts_ms + h * 1000.0, side="left")
+        ok = k < n
+        y[ok, j] = ((mid[k[ok]] - mid[ok]) / tick).astype(np.float32)
+    return y
+
+
+def causal_sigma_sec(mid, ts_ms, tick, base_sec, halflife):
+    """**base_sec 초 구간** 움직임의 인과적 EWMA 표준편차.
+
+    정답의 기준 horizon 과 같은 구간으로 재야 단위가 맞는다. 시점 t 의 값은
+    t 까지 **완료된** 구간만 쓴다 - r[i] 는 (i - base 구간) 의 움직임이므로
+    미래를 보지 않는다.
+    """
+    n = mid.size
+    back = np.searchsorted(ts_ms, ts_ms - base_sec * 1000.0, side="left")
     r = np.zeros(n, dtype=np.float64)
-    if n > base_h:
-        d = (mid[base_h:] - mid[:-base_h]) / tick
-        r[base_h:] = np.where(np.isfinite(d), d, 0.0)
+    good = back < np.arange(n)
+    d = (mid - mid[np.minimum(back, n - 1)]) / tick
+    r[good] = np.where(np.isfinite(d[good]), d[good], 0.0)
 
     alpha = 1.0 - 0.5 ** (1.0 / max(halflife, 1))
     warm = min(halflife, n)
-    seed = float(np.mean(r[base_h:warm] ** 2)) if warm > base_h else 1.0
+    seed = float(np.mean(r[:warm] ** 2)) if warm else 1.0
     acc = seed if np.isfinite(seed) and seed > 0 else 1.0
-
     var = np.empty(n, dtype=np.float64)
     for i in range(n):
         acc += alpha * (r[i] * r[i] - acc)
         var[i] = acc
     sig = np.sqrt(np.maximum(var, 1e-12))
-    floor = float(np.percentile(sig, MIN_SIGMA_PCT))
-    return np.maximum(sig, max(floor, 1e-6))
+    return _apply_floor(sig, halflife)
 
 
 def build_day(cache: str, symbol: str, date: str, tick: float,
-              horizons_buckets, halflife: int):
+              horizons_buckets, halflife_sec: float):
     """하루치 정답(틱)과 sigma 를 만들어 저장한다.
 
     sigma 는 1Δt 기준 하나만 저장한다. horizon j 의 크기는 읽을 때
@@ -158,14 +182,16 @@ def build_day(cache: str, symbol: str, date: str, tick: float,
         idx = np.maximum.accumulate(np.where(~bad, np.arange(n), 0))
         mid = mid[idx]
 
-    y = np.full((n, len(horizons_buckets)), np.nan, dtype=np.float32)
-    for j, h in enumerate(horizons_buckets):
-        if h >= n:
-            continue
-        y[:n - h, j] = ((mid[h:] - mid[:-h]) / tick).astype(np.float32)
+    ts = np.load(base + "_ts.npy").astype(np.float64)
+    # 반감기(초) -> 이벤트 수. 종목·날짜마다 이벤트 속도가 다르다.
+    span = max((ts[-1] - ts[0]) / 1000.0, 1.0)
+    halflife = max(50, int(round(halflife_sec * ts.size / span)))
+    y = targets_by_seconds(mid, ts, tick, spec.TARGET_HORIZONS_SEC)
     y[bad] = np.nan                        # 원래 구멍이던 시점은 무효 처리
 
-    sig = causal_sigma(mid, tick, halflife, horizons_buckets[0]).astype(np.float32)
+    # sigma 도 가장 짧은 horizon 과 같은 구간으로 잰다
+    sig = causal_sigma_sec(mid, ts, tick,
+                           spec.TARGET_HORIZONS_SEC[0], halflife).astype(np.float32)
 
     np.save(base + "_yt.npy", y)          # [K, 3]  틱 단위, 정규화 전
     np.save(base + "_sg.npy", sig)        # [K]     1Δt 인과적 sigma
@@ -179,8 +205,9 @@ def main() -> int:
     ap.add_argument("--dates", nargs="*", default=WEEKDAYS)
     ap.add_argument("--n-val", type=int, default=2)
     ap.add_argument("--n-test", type=int, default=2)
-    ap.add_argument("--halflife", type=int, default=EWMA_HALFLIFE,
-                    help=f"EWMA 반감기(버킷). 기본 {EWMA_HALFLIFE} = 10분")
+    ap.add_argument("--halflife-sec", type=float, default=EWMA_HALFLIFE_SEC,
+                    help=f"EWMA 반감기(초). 기본 {EWMA_HALFLIFE_SEC}초. "
+                         "종목별 이벤트 속도로 환산한다")
     ap.add_argument("--include-test", action="store_true",
                     help="시험일 파일도 만든다. 기본은 만들지 않는다")
     args = ap.parse_args()
@@ -188,8 +215,8 @@ def main() -> int:
     train, val, test = split_dates(args.dates, args.n_val, args.n_test)
     print(f"틱·Delta_t 산출 구간: 학습 {len(train)}일 ({train[0]}~{train[-1]})")
     print(f"검증 {val}   시험 {test}   <- 산출에 쓰지 않는다")
-    print(f"EWMA 반감기 {args.halflife} 버킷 "
-          f"({args.halflife * spec.BUCKET_MS / 1000 / 60:.1f}분)\n")
+    print(f"EWMA 반감기 {args.halflife_sec:.0f}초 (종목별 이벤트 수로 환산)")
+    print(f"horizon {spec.TARGET_HORIZONS_SEC}초\n")
 
     meta = {}
     for sym in args.symbols:
@@ -198,17 +225,14 @@ def main() -> int:
         if not tick or not np.isfinite(dt):
             print(f"{sym}: 데이터 없음, 건너뜀")
             continue
-        hb = [max(1, int(round(m * dt * 1000 / spec.BUCKET_MS)))
-              for m in HORIZON_MULTIPLES]
-        print(f"[{sym}]  틱 {tick:g}   Delta_t {dt:.3f}초")
-        print(f"   horizon {HORIZON_MULTIPLES} x Delta_t "
-              f"= {[round(m*dt, 3) for m in HORIZON_MULTIPLES]}초 "
-              f"= {hb} 버킷")
+        hb = list(spec.TARGET_HORIZONS_SEC)
+        print(f"[{sym}]  틱 {tick:g}   가격변화 1회당 평균 {dt:.3f}초")
+        print(f"   horizon = {hb} 초  (절대 시간, 종목 공통)")
 
         targets = list(train) + list(val) + (list(test) if args.include_test else [])
         made = 0
         for date in targets:
-            if build_day(args.cache, sym, date, tick, hb, args.halflife):
+            if build_day(args.cache, sym, date, tick, hb, args.halflife_sec):
                 made += 1
         # 롤링 sigma 가 시간 변동을 잡고 나면 종목별 **수준** 차이가 남는다.
         # (반감기 1분 실측: AMD 1.11 / META 1.38 / MRVL 1.07 - 25% 차이)
@@ -224,7 +248,9 @@ def main() -> int:
             v = np.nanvar(yy / ss)
             if np.isfinite(v) and v > 0:
                 vs.append(v)
-        lvl = float(np.sqrt(np.mean(vs))) if vs else 1.0
+        # 중앙값을 쓴다. 학습 10일의 정규화 후 분산이 0.03~7.53 로 흔들려서
+        # 평균을 쓰면 극단적인 하루가 보정값을 통째로 끌고 간다 (실측).
+        lvl = float(np.sqrt(np.median(vs))) if vs else 1.0
 
         # winsorize 경계를 **정규화된 z 공간**에서 잡는다. 모델이 실제로 보는
         # 값이라 "몇 표준편차에서 자른다" 로 해석되고, 틱/bp 같은 단위 혼동이
@@ -248,8 +274,8 @@ def main() -> int:
                   f"   분산 {np.round(keep * 100, 1).tolist()}% 제거")
 
         meta[sym] = dict(tick=tick, delta_t_sec=dt,
-                         horizon_multiples=list(HORIZON_MULTIPLES),
-                         horizon_buckets=hb, halflife=args.halflife,
+                         horizons_sec=list(spec.TARGET_HORIZONS_SEC),
+                         horizon_buckets=hb, halflife_sec=args.halflife_sec,
                          level=lvl, fitted_on=list(train),
                          winsor_pct=WINSOR_PCT,
                          clip_lo=None if clip_lo is None else clip_lo.tolist(),

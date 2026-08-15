@@ -12,3 +12,9 @@ env
 preprocessing/digital*
 data/checkpoints/TLOB/v*data/raw/
 data/processed/
+
+# 로컬 작업 데이터 (서버로는 scp 로 옮긴다)
+data/raw/
+data/processed/
+data/processed_ev/
+*.log

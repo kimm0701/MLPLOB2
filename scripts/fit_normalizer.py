@@ -44,58 +44,9 @@ T_LO, T_HI = 0.5, 99.5    # winsorize 경계. 논문과 동일
 MIN_T_SCALE = 1e-9        # 수익률 표준편차의 하한 (소수 단위)
 
 
-def fit_targets(cache: str, symbol: str, train_dates, max_rows: int = 2_000_000):
-    """한 종목의 horizon 별 winsorize 경계와 표준편차를 학습 날짜에서 구한다.
-
-    두 가지를 한다.
-
-    winsorize
-        상하위 0.5% 를 경계값으로 끌어당긴다 (버리지 않는다). 분산이 드문 큰
-        점프에 쏠려 있으면 MSE 가 그걸 쫓느라 학습을 낭비한다. 실측: META 의
-        MSE/MAE^2 이 14.4 로 다른 종목(2.7~3.1)의 5배였고, 피어슨 상관이
-        순위상관의 1/3.5 에 그쳤다 — 순서는 맞히는데 크기를 못 맞히는 상태다.
-
-    표준편차 나눗셈
-        horizon 마다 분산이 10배씩 다르면 (1초 4.5 대 10초 48.0 bp^2) 평균 손실을
-        10초가 18.4%, 1초가 1.7% 로 나눠 갖는다. 정작 신호는 1초에 몰려 있는데
-        학습은 10초에 쏠린다. 나눠주면 10개가 균등해진다. 종목 간 크기 차이도
-        같이 사라져서, 범용 모델이 하나의 출력 크기로 세 종목을 맞출 수 있다.
-
-    평균은 빼지 않는다. 수익률 평균은 표준편차의 0.2% 수준이라 뺄 이유가 없고,
-    상수를 더하는 건 "항상 조금 오른다"는 방향 편향을 심는 일이다.
-    """
-    per_day = max(1, max_rows // max(len(train_dates), 1))
-    chunks = []
-    for date in train_dates:
-        base = os.path.join(cache, symbol, date)
-        if not os.path.exists(base + "_y.npy"):
-            continue
-        y = np.load(base + "_y.npy", mmap_mode="r")
-        idx = np.load(base + "_idx.npy")
-        if idx.size == 0:
-            continue
-        step = max(1, idx.size // per_day)
-        chunks.append(np.asarray(y[idx[::step]], dtype=np.float64))
-    if not chunks:
-        return None
-
-    sample = np.concatenate(chunks, axis=0)
-    ok = np.isfinite(sample).all(axis=1)
-    sample = sample[ok]
-    if sample.shape[0] < 1000:
-        return None
-
-    lo, hi = np.percentile(sample, [T_LO, T_HI], axis=0)
-    clipped = np.clip(sample, lo, hi)
-    scale = np.maximum(clipped.std(axis=0), MIN_T_SCALE)
-
-    return dict(
-        target_clip_lo=lo.tolist(),
-        target_clip_hi=hi.tolist(),
-        target_scale=scale.tolist(),
-        target_scale_raw=sample.std(axis=0).tolist(),   # 자르기 전 (비교용)
-        target_n_rows=int(sample.shape[0]),
-    )
+# 정답 쪽 기준값(winsorize 경계·표준편차)은 scripts/make_targets.py 가 만든다.
+# 정답이 bp·고정 horizon 에서 틱·절대 초로 바뀌면서 이 파일이 다룰 게
+# 없어졌다. 여기는 입력 22 개의 종목별 center/scale 만 담당한다.
 
 
 def fit_symbol(cache: str, symbol: str, train_dates, max_rows: int = 2_000_000):
@@ -164,31 +115,12 @@ def main() -> int:
         if st is None:
             print(f"{sym:<7}  전처리 결과 없음, 건너뜀")
             continue
-        tg = fit_targets(args.cache, sym, train_dates)
-        if tg:
-            st.update(tg)
         stats[sym] = st
         if st["degenerate_features"]:
             print(f"{'':<7}  경고: 퍼짐이 0 인 특징 {st['degenerate_features']}")
         sc = np.asarray(st["scale"])
         print(f"{sym:<7}{st['n_rows']:>12,}{st['n_days']:>6}   "
               f"L1:{sc[0]:.3f}  L10:{sc[9]:.3f}  ofi500:{sc[20]:.3f}")
-
-    # 정답 쪽 요약. winsorize 로 표준편차가 얼마나 줄었는지가 핵심이다 —
-    # 많이 줄었다는 건 분산이 드문 극단값에 쏠려 있었다는 뜻이다.
-    if any("target_scale" in s for s in stats.values()):
-        print(f"\n{'종목':<7}{'horizon':>9}{'자르기 전':>12}{'자른 후':>11}"
-              f"{'감소':>8}   (bp)")
-        print("-" * 52)
-        for sym in sorted(stats):
-            st = stats[sym]
-            if "target_scale" not in st:
-                continue
-            a = np.asarray(st["target_scale_raw"]) * 1e4
-            b = np.asarray(st["target_scale"]) * 1e4
-            for j in (0, 4, 9):
-                print(f"{sym if j == 0 else '':<7}{spec.TARGET_HORIZONS_SEC[j]:>7}초"
-                      f"{a[j]:>12.3f}{b[j]:>11.3f}{(1-b[j]/a[j])*100:>7.1f}%")
 
     if not stats:
         print("\n계산된 기준값이 없습니다. scripts/preprocess.py 를 먼저 돌리세요.",
