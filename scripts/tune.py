@@ -35,7 +35,7 @@ from utils.lightning_compat import (                           # noqa: E402
     EarlyStopping,
     Trainer,
 )
-from models.mlplob import MLPLOB                               # noqa: E402
+from models.registry import build_model                        # noqa: E402
 from models.regression_engine import RegressionEngine          # noqa: E402
 from preprocessing.ofi_dataset import (                        # noqa: E402
     build_split,
@@ -219,10 +219,19 @@ def main() -> int:
     ap.add_argument("--limit-val-batches", type=float, default=0.1,
                     help="한 시도의 검증 분량. 탐색 중에는 일부만 봐도 순위가 갈린다")
     ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--study", default="mlplob_ofi")
+    ap.add_argument("--arch", default="mlplob", choices=["mlplob", "lstm"])
+    ap.add_argument("--objective", default="val_r2",
+                    choices=["val_r2", "val_r2_short"],
+                    help="val_r2 는 4개 horizon 평균(보정후), val_r2_short 는 "
+                         "가장 짧은 0.5초만. 마켓메이킹이면 short 가 맞다")
+    ap.add_argument("--study", default=None,
+                    help="기본값은 구조별로 자동 (mlplob_ofi / lstm_ofi). "
+                         "탐색공간이 다르므로 섞으면 안 된다")
     ap.add_argument("--storage", default=None,
                     help="예: sqlite:///data/optuna.db  중단 후 이어서 하려면")
     args = ap.parse_args()
+    if not args.study:
+        args.study = f"{args.arch}_ofi"
 
     try:
         import optuna
@@ -246,8 +255,20 @@ def main() -> int:
     print(f"학습 {len(train_ds):,}샘플 (간격 {args.stride})   검증 {len(val_ds):,}샘플\n")
 
     def objective(trial):
-        hidden = trial.suggest_categorical("hidden_dim", [64, 128, 144, 192, 256])
-        layers = trial.suggest_int("num_layers", 2, 6)
+        # 구조마다 의미 있는 범위가 다르다. LSTM 은 층을 쌓아도 잘 안 좋아지고
+        # (논문에서 LSTM(3) 이 단층과 사실상 동등), 대신 은닉 크기와 드롭아웃이
+        # 실제로 성능을 가른다. MLPLOB 은 반대로 층 수가 주된 손잡이다.
+        if args.arch == "lstm":
+            hidden = trial.suggest_categorical("hidden_dim", [64, 96, 128, 192, 256])
+            layers = trial.suggest_int("num_layers", 1, 3)
+            # 단층에는 층간 드롭아웃이 없다. 그래도 항상 제안해야 TPE 의
+            # 탐색공간이 시도마다 흔들리지 않는다.
+            dropout = trial.suggest_float("dropout", 0.0, 0.3)
+            use_bin = trial.suggest_categorical("use_bin", [True, False])
+        else:
+            hidden = trial.suggest_categorical("hidden_dim", [64, 128, 144, 192, 256])
+            layers = trial.suggest_int("num_layers", 2, 6)
+            dropout, use_bin = None, None
         lr = trial.suggest_float("lr", 1e-5, 3e-3, log=True)
         batch = trial.suggest_categorical("batch_size", [128, 256, 512])
         loss = trial.suggest_categorical("loss_type", ["mse", "huber"])
@@ -255,13 +276,17 @@ def main() -> int:
         # 오차 몇 bp 까지를 신호로 볼지. huber 일 때만 쓰인다.
         beta = trial.suggest_float("huber_beta", 1.0, 10.0) if loss == "huber" else 1.0
 
-        pruner_cb, kind = make_pruning_callback(trial)
+        pruner_cb, kind = make_pruning_callback(trial, monitor=args.objective)
         if trial.number == 0:
-            print(f"가지치기 콜백: {kind}")
+            print(f"가지치기 콜백: {kind}   목적함수: {args.objective}")
 
-        cfg = dict(hidden_dim=hidden, num_layers=layers, seq_size=spec.SEQ_LEN,
-                   num_features=spec.INPUT_DIM, dataset_type="OFI")
-        engine = RegressionEngine(model=MLPLOB(**cfg), lr=lr, loss_type=loss,
+        cfg = dict(arch=args.arch, hidden_dim=hidden, num_layers=layers,
+                   seq_size=spec.SEQ_LEN, num_features=spec.INPUT_DIM,
+                   dataset_type="OFI")
+        if args.arch == "lstm":
+            cfg["dropout"] = dropout
+            cfg["use_bin"] = use_bin
+        engine = RegressionEngine(model=build_model(cfg), lr=lr, loss_type=loss,
                                   weight_decay=wd, eval_names=["all"],
                                   model_config=cfg, pooled_name=None,
                                   huber_beta=beta,
@@ -273,7 +298,7 @@ def main() -> int:
             accelerator="gpu" if torch.cuda.is_available() else "cpu",
             max_epochs=args.max_epochs,
             callbacks=[_ReportRecorder(trial), pruner_cb,
-                       EarlyStopping(monitor="val_loss", mode="min", patience=args.patience)],
+                       EarlyStopping(monitor=args.objective, mode="max", patience=args.patience)],
             num_sanity_val_steps=0,
             limit_train_batches=args.limit_train_batches,
             limit_val_batches=args.limit_val_batches,
@@ -294,7 +319,7 @@ def main() -> int:
         #
         # 학습 손실로 채점하면 안 되는 이유도 같다 — huber 가 mse 보다 항상
         # 작은 값을 내서 (실측 2.08 대 20.80) 성능과 무관하게 huber 만 뽑힌다.
-        value = trainer.callback_metrics.get("val_r2")
+        value = trainer.callback_metrics.get(args.objective)
         if value is None or not math.isfinite(float(value)):
             # 예측이 상수로 무너지면 배율도 상관계수도 정의되지 않는다.
             # 실측: weight_decay 8.6e-3 이 모델을 눌러 이 상태를 만들었다.

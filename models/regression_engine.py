@@ -290,6 +290,12 @@ class RegressionEngine(LightningModule):
                  add_dataloader_idx=False)
         self.log(f"{stage}_r2", float(np.nanmean(primary["r2_cal"])),
                  prog_bar=True, add_dataloader_idx=False)
+        # 가장 짧은 horizon 만 따로. 마켓메이킹에서는 여기가 실질적으로 쓰이는
+        # 구간인데, 4개 평균은 먼 horizon 이 지배해서 짧은 쪽 최적점을 가린다
+        # (실측: 손실 최고는 epoch 2, 0.5초 R2 최고는 epoch 3).
+        r2c = np.asarray(primary["r2_cal"], dtype=float)
+        if r2c.size:
+            self.log(f"{stage}_r2_short", float(r2c[0]), add_dataloader_idx=False)
 
         self._print_report(stage, report)
         self.last_report = report

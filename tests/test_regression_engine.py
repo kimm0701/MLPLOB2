@@ -179,7 +179,10 @@ def test_tune_scores_on_r2_not_on_a_training_loss():
     쪽이 이긴다. 둘 다 자기가 최적화한 지표로 채점받는 셈이다.
     """
     src = _tune_src()
-    assert 'callback_metrics.get("val_r2")' in src
+    # 채점 지표는 --objective 로 고르되, 고를 수 있는 값이 전부 R2 여야 한다.
+    assert 'callback_metrics.get(args.objective)' in src
+    assert 'choices=["val_r2", "val_r2_short"]' in src, \
+        "채점 후보는 R2 계열만 둔다 — 손실이나 IC 를 고를 수 있으면 안 된다"
     assert 'callback_metrics.get("val_loss")' not in src
     assert 'callback_metrics.get("val_ic")' not in src
     assert 'direction="maximize"' in src, "R2 는 클수록 좋다"
@@ -412,8 +415,15 @@ def test_paper_settings_are_the_defaults():
     src = _tune_src()
     # 가지치기는 스터디 방향(maximize)과 같은 값을 봐야 한다
     assert 'monitor: str = "val_r2"' in src
-    assert 'EarlyStopping(monitor="val_loss", mode="min"' in src, \
-        "학습 중단은 논문대로 검증 손실로 본다"
+    # 학습 중단도 채점 지표를 따라간다.
+    #
+    # 원래는 논문대로 검증 손실로 봤다. 그런데 실측에서 둘이 어긋났다 —
+    # 손실 최고점은 epoch 2, 0.5초 R2 최고점은 epoch 3 이었다. 손실은 4개
+    # horizon 평균이라 먼 쪽이 지배하는데, 채점은 R2 로 하기 때문이다.
+    # 중단 기준이 채점 기준과 다르면 아직 오르고 있는 시도를 끊고서 그 시도의
+    # 최고 R2 를 못 본 채로 점수를 매기게 된다.
+    assert 'EarlyStopping(monitor=args.objective, mode="max"' in src, \
+        "학습 중단은 채점 지표와 같은 것을 봐야 한다"
 
     tr = _io_read("scripts/train.py")
     assert '"--max-epochs", type=int, default=50' in tr, "논문은 50 epoch"
