@@ -108,3 +108,18 @@ def test_단층이면_dropout_경고가_없다():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         build_model(cfg(num_layers=1, dropout=0.3))
+
+
+def test_손실을_고정하면_탐색하지_않는다():
+    """--loss 로 고정했는데도 탐색공간에 남아 있으면 시도를 나눠 먹는다.
+
+    실제로 손실을 열어둔 채 돌렸더니 은닉 64 시도가 우연히 전부 huber 라서
+    huber 가 이긴 것처럼 보였다. 같은 은닉으로 붙은 유일한 비교(128)에서는
+    mse 가 이겼다 — 손실이 아니라 크기의 효과였다.
+    """
+    import io as _io
+    import os as _os
+    src = _io.open(_os.path.join(_os.path.dirname(_os.path.dirname(
+        _os.path.abspath(__file__))), "scripts", "tune.py"), encoding="utf-8").read()
+    assert 'loss = args.loss or trial.suggest_categorical' in src
+    assert '"--loss", default=None, choices=["mse", "huber"]' in src

@@ -209,6 +209,9 @@ def main() -> int:
     ap.add_argument("--max-epochs", type=int, default=8)
     ap.add_argument("--patience", type=int, default=3,
                     help="탐색 중에는 논문의 5보다 짧게 둔다 — 시도 수를 확보하기 위해")
+    ap.add_argument("--loss", default=None, choices=["mse", "huber"],
+                    help="지정하면 손실을 고정하고 탐색하지 않는다. "
+                         "구조만 보고 싶을 때 쓴다")
     ap.add_argument("--normalize-target", action="store_true")
     ap.add_argument("--winsorize", action="store_true")
     ap.add_argument("--no-rolling", action="store_true",
@@ -280,9 +283,17 @@ def main() -> int:
             dropout, use_bin = None, None
         lr = trial.suggest_float("lr", 1e-5, 3e-3, log=True)
         batch = trial.suggest_categorical("batch_size", [128, 256, 512])
-        loss = trial.suggest_categorical("loss_type", ["mse", "huber"])
+        # 손실은 --loss 로 고정할 수 있다.
+        #
+        # 우리는 근거를 갖고 mse 를 골랐다 — 정답의 절반 이상이 정확히 0 이라
+        # 중앙값을 겨냥하는 계열은 "항상 0" 이 최적해가 된다. 그런데도 탐색이
+        # 이걸 매번 다시 뒤지면 시도 20회를 나눠 먹기만 하고, 실제로 한 번
+        # 잘못된 결론이 나왔다 — 은닉 64 시도가 우연히 전부 huber 라서
+        # huber 가 이긴 것처럼 보였다. 같은 은닉으로 붙은 유일한 비교(128)
+        # 에서는 mse 가 이겼다.
+        loss = args.loss or trial.suggest_categorical("loss_type", ["mse", "huber"])
         wd = trial.suggest_float("weight_decay", 1e-8, 1e-2, log=True)
-        # 오차 몇 bp 까지를 신호로 볼지. huber 일 때만 쓰인다.
+        # 오차 몇 시그마까지를 제곱으로 볼지. huber 일 때만 쓰인다.
         beta = trial.suggest_float("huber_beta", 1.0, 10.0) if loss == "huber" else 1.0
 
         pruner_cb, kind = make_pruning_callback(trial, monitor=args.objective)
