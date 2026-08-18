@@ -247,6 +247,20 @@ def build_day(cache: str, symbol: str, date: str, tick: float,
     y = targets_by_seconds(mid, ts, tick, spec.TARGET_HORIZONS_SEC)
     y[bad] = np.nan                        # 원래 구멍이던 시점은 무효 처리
 
+    # 깨진 스냅샷은 **입력 창에 섞이기만 해도** 그 표본을 버린다.
+    #
+    # 정답만 무효로 하면 그 시점은 예측 대상에서 빠지지만, 100개짜리 입력 창
+    # 안에는 그대로 들어온다. 창 하나에 스프레드 59,091틱 같은 값이 섞이면
+    # 그 표본의 예측은 잡음이고, 잡음 예측의 제곱오차가 손실을 왜곡한다.
+    #
+    # 정답을 NaN 으로 만들어 두면 Dataset 이 '정답이 유한한 것만' 고르는
+    # 기존 필터에 그대로 걸린다. 별도 배선이 필요 없다.
+    if bad.any():
+        c = np.concatenate([[0], np.cumsum(bad.astype(np.int64))])
+        k = np.arange(n)
+        lo = np.maximum(k - spec.SEQ_LEN + 1, 0)
+        y[(c[k + 1] - c[lo]) > 0] = np.nan
+
     # sigma 도 가장 짧은 horizon 과 같은 구간으로 잰다
     raw = causal_sigma_sec(mid, ts, tick, spec.TARGET_HORIZONS_SEC[0],
                            halflife, floor=None, seed=seed)
