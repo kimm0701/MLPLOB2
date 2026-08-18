@@ -107,6 +107,7 @@ class RegressionEngine(LightningModule):
         weight_decay: float = 0.0,
         eval_names: list[str] | None = None,
         ckpt_dir: str | None = None,
+        ckpt_monitor: str = "loss",
         horizons=tuple(spec.TARGET_HORIZONS_SEC),
         model_config: dict | None = None,
         pooled_name: str | None = "all",
@@ -129,6 +130,13 @@ class RegressionEngine(LightningModule):
         # 종목별 결과를 이어붙여 만들 합산 항목의 이름. None 이면 안 만든다.
         self.pooled_name = pooled_name
         self.ckpt_dir = ckpt_dir
+        # 무엇이 좋아졌을 때 저장할지. loss 는 4개 horizon 평균이라
+        # 먼 쪽이 지배한다. 마켓메이킹은 0.5초가 실질 구간이라
+        # r2_short 로 두면 그 지점의 최적을 놓치지 않는다.
+        #
+        # 실측: 두 번의 학습에서 모두 손실 최고점과 R2 최고점이 어긋났다.
+        # 손실 차이가 0.00001 인데 R2 는 epoch2 가 전 구간 우위였다.
+        self.ckpt_monitor = ckpt_monitor
         self.horizons = list(horizons)
         # 종목별 정답 표준편차 (소수 단위). 있으면 정답이 이미 표준화된 것이므로
         # 손실에 추가 배율을 걸지 않고, 지표 계산 전에 곱해서 되돌린다.
@@ -145,7 +153,7 @@ class RegressionEngine(LightningModule):
         self._train_losses: list[float] = []
         self._buffers: dict[int, dict[str, list]] = {}
         self._raw: dict[str, dict] = {}
-        self.best_val = float("inf")
+        self.best_val = float("inf") if ckpt_monitor == "loss" else float("-inf")
         self.best_ckpt_path: str | None = None
         self.last_report: dict[str, dict] = {}
 
@@ -302,9 +310,19 @@ class RegressionEngine(LightningModule):
         self._buffers.clear()
         self._raw.clear()
 
-        if stage == "val" and primary["loss"] < self.best_val:
-            self.best_val = primary["loss"]
-            self._save_checkpoint(primary["loss"])
+        if stage == "val":
+            if self.ckpt_monitor == "loss":
+                score, better = primary["loss"], lambda a, b: a < b
+            elif self.ckpt_monitor == "r2_short":
+                r2c = np.asarray(primary["r2_cal"], dtype=float)
+                score = float(r2c[0]) if r2c.size else float("nan")
+                better = lambda a, b: a > b            # noqa: E731
+            else:
+                score = float(np.nanmean(primary["r2_cal"]))
+                better = lambda a, b: a > b            # noqa: E731
+            if np.isfinite(score) and better(score, self.best_val):
+                self.best_val = score
+                self._save_checkpoint(score)
 
     def on_validation_epoch_end(self):
         self._finish_eval("val")

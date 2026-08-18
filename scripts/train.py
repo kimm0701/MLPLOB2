@@ -64,6 +64,11 @@ def build_args():
     ap.add_argument("--n-val", type=int, default=spec.N_VAL)
     ap.add_argument("--n-test", type=int, default=spec.N_TEST)
 
+    ap.add_argument("--objective", default="val_loss",
+                    choices=["val_loss", "val_r2", "val_r2_short"],
+                    help="조기종료·체크포인트 기준. val_loss 는 4개 horizon "
+                         "평균이라 먼 쪽이 지배한다. 마켓메이킹이면 "
+                         "val_r2_short(0.5초) 가 맞다")
     ap.add_argument("--arch", default="mlplob", choices=["mlplob", "lstm"],
                     help="모델 구조. lstm 은 Kolm 2023 Table 1 구성")
 
@@ -206,6 +211,8 @@ def main() -> int:
         eval_names=val_names,
         ckpt_dir=ckpt_dir,
         model_config=model_config,
+        ckpt_monitor={"val_loss": "loss", "val_r2": "r2",
+                      "val_r2_short": "r2_short"}[args.objective],
         target_scale_by_name=(target_scales(args.cache, test_names)
                               if args.normalize_target else None),
         # 롤링 경로에서는 배율이 배치에 실려 오므로 종목 상수를 두지 않는다
@@ -216,7 +223,8 @@ def main() -> int:
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         max_epochs=args.max_epochs,
         callbacks=[
-            EarlyStopping(monitor="val_loss", mode="min",
+            EarlyStopping(monitor=args.objective,
+                          mode="min" if args.objective == "val_loss" else "max",
                           patience=args.patience, verbose=True),
             TQDMProgressBar(refresh_rate=200),
         ],

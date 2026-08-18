@@ -255,7 +255,16 @@ def test_일중계수는_과거_날짜에서만_온다():
         s2 = causal_sigma_sec(m2, ts, 0.01, 0.5, 1500, floor=0.5, coef=coef)
         assert np.allclose(base[:cut], s2[:cut]), f"{cut} 이후가 그 앞에 영향"
 
-    # 계수가 클수록 sigma 가 크다 (모양이 반영된다)
-    c2 = np.where(np.arange(n) > n // 2, 4.0, 1.0)
+    # 계수가 뛰면 sigma 가 **즉시** 뛴다. 그게 이 설계의 요점이다 -
+    # EWMA 가 90초 걸려 따라잡는 것을 계수가 그 자리에서 반영한다.
+    #
+    # 다만 정상 상태에서는 원래 값으로 돌아온다. 나누고 곱하므로 상쇄되기
+    # 때문이다. 데이터에 실제 주기가 없으면 계수는 전환 순간만 바꾼다.
+    k = n // 2
+    c2 = np.where(np.arange(n) > k, 4.0, 1.0)
     s = causal_sigma_sec(mid, ts, 0.01, 0.5, 1500, floor=1e-6, coef=c2)
-    assert np.median(s[n // 2 + 2000:]) > 2 * np.median(s[:n // 2])
+    before = np.median(s[k - 500:k])
+    right_after = np.median(s[k + 1:k + 50])
+    settled = np.median(s[-2000:])
+    assert right_after > 3 * before, "계수가 뛰었는데 sigma 가 즉시 안 뛴다"
+    assert settled < 0.6 * right_after, "정상 상태로 안 돌아온다 (상쇄가 안 됨)"
