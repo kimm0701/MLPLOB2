@@ -92,8 +92,8 @@ def main() -> int:
     ap.add_argument("--cache", default="data/processed")
     ap.add_argument("--symbols", nargs="*", default=sorted(FILE_IDS))
     ap.add_argument("--dates", nargs="*", default=WEEKDAYS)
-    ap.add_argument("--n-val", type=int, default=2)
-    ap.add_argument("--n-test", type=int, default=2)
+    ap.add_argument("--n-val", type=int, default=spec.N_VAL)
+    ap.add_argument("--n-test", type=int, default=spec.N_TEST)
     ap.add_argument("--out", default=None, help="기본값: <cache>/normalizer.json")
     args = ap.parse_args()
 

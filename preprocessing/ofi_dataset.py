@@ -271,12 +271,14 @@ def describe(ds: ConcatDataset) -> str:
 # ----------------------------------------------------------------------------
 # 날짜 단위 시간순 분할 (§17)
 # ----------------------------------------------------------------------------
-def split_dates(dates, n_val: int = 2, n_test: int = 2):
+def split_dates(dates, n_val: int | None = None, n_test: int | None = None):
     """날짜 목록을 학습/검증/최종시험으로 시간순 분할.
 
     날짜 단위로 자르면 한 샘플의 입력·정답 구간이 통째로 하루 안에 들어가므로
     구간 사이 침범이 원천적으로 없다. 최종시험은 **가장 최근** 날짜를 쓴다.
     """
+    n_val = spec.N_VAL if n_val is None else n_val
+    n_test = spec.N_TEST if n_test is None else n_test
     dates = sorted(dates)
     assert n_val >= 0 and n_test >= 0, (n_val, n_test)
     assert len(dates) > n_val + n_test, f"날짜가 너무 적다: {len(dates)}"

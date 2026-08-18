@@ -62,5 +62,16 @@ STATE_FEATURES = 2              # 뒤에서 이만큼은 종목별 정규화에�
 OF_DIM = INPUT_DIM - STATE_FEATURES
 OF_FEATURE_NAMES = FEATURE_NAMES[:OF_DIM]
 
+# 날짜 분할. **한 곳에서만 정한다.**
+#
+# 여기가 흩어져 있으면 조용한 누출이 생긴다 - make_targets 가 n_val=2 로
+# level·winsorize 경계를 뽑았는데 train.py 가 n_val=4 로 돌면, 그 경계가
+# 지금은 검증일인 날짜에서 나온 값이 된다.
+#
+# 검증 4일: 2일로는 하루 이상치가 성적의 절반을 좌우했다. 실측으로 하루짜리
+# R2 가 -0.087 까지 튀고, META 는 07-28 정상 / 07-29 붕괴로 갈렸다.
+N_VAL = 4
+N_TEST = 4
+
 assert len(FEATURE_NAMES) == INPUT_DIM
 assert len(TARGET_HORIZONS_SEC) == OUTPUT_DIM

@@ -61,8 +61,8 @@ def build_args():
     ap.add_argument("--dates", nargs="*", default=WEEKDAYS)
     ap.add_argument("--held-out", default=None,
                     help="이 종목은 학습·검증에서 빼고 시험에만 쓴다")
-    ap.add_argument("--n-val", type=int, default=2)
-    ap.add_argument("--n-test", type=int, default=2)
+    ap.add_argument("--n-val", type=int, default=spec.N_VAL)
+    ap.add_argument("--n-test", type=int, default=spec.N_TEST)
 
     ap.add_argument("--arch", default="mlplob", choices=["mlplob", "lstm"],
                     help="모델 구조. lstm 은 Kolm 2023 Table 1 구성")

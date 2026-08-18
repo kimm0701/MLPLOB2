@@ -44,8 +44,8 @@ def main() -> int:
     ap.add_argument("--cache", default="data/processed")
     ap.add_argument("--symbols", nargs="*", default=sorted(FILE_IDS))
     ap.add_argument("--dates", nargs="*", default=WEEKDAYS)
-    ap.add_argument("--n-val", type=int, default=2)
-    ap.add_argument("--n-test", type=int, default=2)
+    ap.add_argument("--n-val", type=int, default=spec.N_VAL)
+    ap.add_argument("--n-test", type=int, default=spec.N_TEST)
     ap.add_argument("--loss", nargs="*", type=float, default=None,
                     help="관측된 손실 (학습 검증 시험 순). 주면 R2 로 환산해 준다")
     args = ap.parse_args()

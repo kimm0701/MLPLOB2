@@ -123,3 +123,39 @@ def test_손실을_고정하면_탐색하지_않는다():
         _os.path.abspath(__file__))), "scripts", "tune.py"), encoding="utf-8").read()
     assert 'loss = args.loss or trial.suggest_categorical' in src
     assert '"--loss", default=None, choices=["mse", "huber"]' in src
+
+
+def test_날짜분할이_한곳에서만_정해진다():
+    """분할 기본값이 스크립트마다 흩어져 있으면 조용한 누출이 생긴다.
+
+    make_targets 가 n_val=2 로 level·winsorize 경계를 뽑았는데 train.py 가
+    n_val=4 로 돌면, 그 경계는 지금은 검증일인 날짜에서 나온 값이 된다.
+    성적은 좋아 보이고 원인은 안 보인다.
+    """
+    import glob as _glob
+    import io as _io
+    import os as _os
+
+    root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    bad = []
+    for f in _glob.glob(_os.path.join(root, "scripts", "*.py")):
+        src = _io.open(f, encoding="utf-8").read()
+        for flag in ("--n-val", "--n-test"):
+            if f'"{flag}", type=int, default=' in src:
+                line = src.split(f'"{flag}", type=int, default=')[1][:20]
+                if not line.startswith("spec.N_"):
+                    bad.append(f"{_os.path.basename(f)} {flag}")
+    assert not bad, f"spec.N_VAL/N_TEST 를 쓰지 않는 곳: {bad}"
+
+    assert spec.N_VAL >= 1 and spec.N_TEST >= 1
+
+
+def test_split_dates가_spec을_따른다():
+    from preprocessing.ofi_dataset import split_dates
+
+    days = [f"2026{m:02d}{d:02d}" for m in (7, 8) for d in range(1, 16)]
+    tr, va, te = split_dates(days)
+    assert len(va) == spec.N_VAL and len(te) == spec.N_TEST
+    assert len(tr) + len(va) + len(te) == len(days)
+    # 시험은 가장 최근이어야 한다 — 과거로 미래를 시험하면 의미가 없다
+    assert max(tr) < min(va) < max(va) < min(te)
