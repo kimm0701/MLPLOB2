@@ -229,7 +229,7 @@ def build_day(cache: str, symbol: str, date: str, tick: float,
 
     np.save(base + "_yt.npy", y)          # [K, 3]  틱 단위, 정규화 전
     np.save(base + "_sg.npy", sig)        # [K]     1Δt 인과적 sigma
-    return y, sig
+    return y, sig, nxt
 
 
 def main() -> int:
