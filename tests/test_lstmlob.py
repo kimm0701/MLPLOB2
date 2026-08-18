@@ -159,3 +159,45 @@ def test_split_dates가_spec을_따른다():
     assert len(tr) + len(va) + len(te) == len(days)
     # 시험은 가장 최근이어야 한다 — 과거로 미래를 시험하면 의미가 없다
     assert max(tr) < min(va) < max(va) < min(te)
+
+
+def test_sigma가_어느_지점_이후도_보지_않는다():
+    """기존 테스트는 '뒤쪽 절반'만 봐서 하한 누출을 놓쳤다.
+
+    하한을 그날 앞쪽 구간에서 뽑던 판본은 시점 200 의 sigma 가 시점 3000 의
+    데이터에 좌우됐다. 하루 앞쪽 0.3% 안에서 벌어진 일이라 '절반' 검사의
+    사각지대였다. 이제 **여러 절단점**에서 확인한다.
+    """
+    import numpy as np
+    from scripts.make_targets import causal_sigma_sec
+
+    rng = np.random.default_rng(0)
+    n = 20000
+    ts = np.cumsum(rng.integers(20, 120, n)).astype(float)
+    mid = 100 + np.cumsum(rng.normal(0, 0.01, n))
+    base = causal_sigma_sec(mid, ts, 0.01, 0.5, 1500, floor=0.5)
+
+    for cut in (200, 1000, 3000, 8000, n // 2):
+        m2 = mid.copy()
+        m2[cut:] += np.cumsum(rng.normal(0, 0.5, n - cut))
+        s2 = causal_sigma_sec(m2, ts, 0.01, 0.5, 1500, floor=0.5)
+        assert np.allclose(base[:cut], s2[:cut]), \
+            f"{cut} 이후를 바꿨는데 그 앞 sigma 가 변했다 = 미래 참조"
+
+
+def test_하한은_전날에서_온다():
+    """같은 날 데이터로 하한을 만들면 그 자체가 미래 참조다."""
+    import inspect
+
+    from scripts import make_targets as mt
+
+    src = inspect.getsource(mt._apply_floor)
+    assert "percentile" not in src, \
+        "_apply_floor 안에서 분위수를 구하면 그날 데이터를 쓰는 것이다"
+    assert "floor" in inspect.signature(mt.causal_sigma_sec).parameters
+
+    # 첫날은 전날이 없으므로 절대 하한만
+    import numpy as np
+    sig = np.array([1e-9, 0.5, 2.0])
+    assert mt._apply_floor(sig, None)[0] == 1e-6
+    assert np.allclose(mt._apply_floor(sig, 0.3), [0.3, 0.5, 2.0])

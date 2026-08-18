@@ -105,20 +105,32 @@ def measure_dt(cache: str, symbol: str, dates) -> float:
     return tot * spec.BUCKET_MS / 1000.0 / chg
 
 
-def _apply_floor(sig: np.ndarray, halflife: int) -> np.ndarray:
+def day_floor(sig: np.ndarray) -> float:
+    """그날 sigma 분포의 하위 MIN_SIGMA_PCT %.  **다음 날에 쓸 하한**이다."""
+    sig = sig[np.isfinite(sig)]
+    return float(np.percentile(sig, MIN_SIGMA_PCT)) if sig.size else 0.0
+
+
+def _apply_floor(sig: np.ndarray, floor: float | None) -> np.ndarray:
     """0 에 가까운 sigma 로 나누는 것을 막되, **미래를 보지 않고** 막는다.
 
-    예전에는 하루 전체 sigma 분포의 하위 5% 를 하한으로 썼다. 그 한 숫자에
-    미래가 섞여 있었다 - 단위 테스트가 "뒤쪽 절반을 바꾸면 앞쪽 sigma 가
-    변한다" 로 잡아냈다.
+    하한은 **전날** 분포에서 구한 값을 받는다. 실시간에서도 그대로 재현된다 -
+    장이 열릴 때 어제 값은 이미 알고 있다.
 
-    이제 하한을 **워밍업 구간(앞쪽 halflife 개)** 에서만 구한다. 그 구간은
-    valid_sample_indices 가 어차피 버리므로, 실제로 쓰는 모든 시점에 대해
-    하한은 과거 정보다.
+    첫날은 전날이 없으므로 절대 하한 1e-6 만 쓴다. 하루치를 버리는 것보다
+    낫고, 어차피 학습 구간의 맨 앞이다.
+
+    이전 두 판본이 모두 틀렸다.
+      1) 하루 전체 분포의 하위 5%  - 명백히 미래를 봤다
+      2) 그날 앞쪽 halflife 개 구간 - "그 구간은 어차피 학습에서 버린다" 는
+         전제로 넣었는데, 실측해 보니 표본은 인덱스 199 부터 시작하고 그 창은
+         3,400~5,200 이라 **버리지 않았다**. 하루 표본의 0.55% 가 미래로 만든
+         하한을 쓰고 있었다.
     """
-    w = min(max(halflife, 100), sig.size)
-    floor = float(np.percentile(sig[:w], MIN_SIGMA_PCT)) if w else 0.0
-    return np.maximum(sig, max(floor, 1e-6))
+    f = 1e-6
+    if floor is not None and np.isfinite(floor):
+        f = max(float(floor), 1e-6)
+    return np.maximum(sig, f)
 
 
 def targets_by_seconds(mid, ts_ms, tick, horizons_sec):
@@ -136,12 +148,16 @@ def targets_by_seconds(mid, ts_ms, tick, horizons_sec):
     return y
 
 
-def causal_sigma_sec(mid, ts_ms, tick, base_sec, halflife):
+def causal_sigma_sec(mid, ts_ms, tick, base_sec, halflife,
+                     floor=None, seed=None):
     """**base_sec 초 구간** 움직임의 인과적 EWMA 표준편차.
 
     정답의 기준 horizon 과 같은 구간으로 재야 단위가 맞는다. 시점 t 의 값은
     t 까지 **완료된** 구간만 쓴다 - r[i] 는 (i - base 구간) 의 움직임이므로
     미래를 보지 않는다.
+
+    floor / seed 는 **전날**에서 받는다. 그래야 하루 앞쪽 구간도 미래를
+    보지 않는다. 실시간 시스템이 장 시작 때 어제 상태를 이어받는 것과 같다.
     """
     n = mid.size
     back = np.searchsorted(ts_ms, ts_ms - base_sec * 1000.0, side="left")
@@ -152,18 +168,33 @@ def causal_sigma_sec(mid, ts_ms, tick, base_sec, halflife):
 
     alpha = 1.0 - 0.5 ** (1.0 / max(halflife, 1))
     warm = min(halflife, n)
-    seed = float(np.mean(r[:warm] ** 2)) if warm else 1.0
-    acc = seed if np.isfinite(seed) and seed > 0 else 1.0
     var = np.empty(n, dtype=np.float64)
+
+    # 초기값도 미래를 보면 안 된다.
+    #
+    # 예전에는 r[:halflife] 의 평균제곱을 초기값으로 썼다. 그러면 시점 0 의
+    # sigma 가 시점 halflife 까지의 데이터에 좌우된다 - 하루 앞쪽 0.3% 구간이
+    # 통째로 미래 참조였다. 회귀 테스트가 '뒤쪽 절반'만 봐서 못 잡았다.
+    #
+    # 이제 두 가지로 나눈다.
+    #   전날 값이 있으면  그걸 이어받는다 (실시간 시스템이 하는 그대로)
+    #   없으면(첫날)      확장 평균으로 시작한다 - 시점 i 는 r[:i+1] 만 쓴다
+    acc = float(seed) if seed is not None and np.isfinite(seed) and seed > 0 else None
+    run = 0.0
     for i in range(n):
-        acc += alpha * (r[i] * r[i] - acc)
+        r2 = r[i] * r[i]
+        if acc is None or (i < warm and seed is None):
+            run += r2
+            acc = run / (i + 1)
+        else:
+            acc += alpha * (r2 - acc)
         var[i] = acc
     sig = np.sqrt(np.maximum(var, 1e-12))
-    return _apply_floor(sig, halflife)
+    return _apply_floor(sig, floor)
 
 
 def build_day(cache: str, symbol: str, date: str, tick: float,
-              horizons_buckets, halflife_sec: float):
+              horizons_buckets, halflife_sec: float, floor=None, seed=None):
     """하루치 정답(틱)과 sigma 를 만들어 저장한다.
 
     sigma 는 1Δt 기준 하나만 저장한다. horizon j 의 크기는 읽을 때
@@ -190,8 +221,11 @@ def build_day(cache: str, symbol: str, date: str, tick: float,
     y[bad] = np.nan                        # 원래 구멍이던 시점은 무효 처리
 
     # sigma 도 가장 짧은 horizon 과 같은 구간으로 잰다
-    sig = causal_sigma_sec(mid, ts, tick,
-                           spec.TARGET_HORIZONS_SEC[0], halflife).astype(np.float32)
+    raw = causal_sigma_sec(mid, ts, tick, spec.TARGET_HORIZONS_SEC[0],
+                           halflife, floor=None, seed=seed)
+    sig = _apply_floor(raw, floor).astype(np.float32)
+    # 다음 날에 넘길 상태: 하한은 하한 씌우기 전 분포에서, 초기값은 마지막 분산.
+    nxt = (day_floor(raw), float(raw[-1] ** 2) if raw.size else None)
 
     np.save(base + "_yt.npy", y)          # [K, 3]  틱 단위, 정규화 전
     np.save(base + "_sg.npy", sig)        # [K]     1Δt 인과적 sigma
@@ -231,9 +265,15 @@ def main() -> int:
 
         targets = list(train) + list(val) + (list(test) if args.include_test else [])
         made = 0
+        # 하한은 **전날** 것을 쓴다. 그래서 날짜 순서대로 돌면서 이어 넘긴다.
+        # targets 는 학습->검증(->시험) 순이라 이미 시간순이다.
+        floor = seed = None
         for date in targets:
-            if build_day(args.cache, sym, date, tick, hb, args.halflife_sec):
+            got = build_day(args.cache, sym, date, tick, hb,
+                            args.halflife_sec, floor=floor, seed=seed)
+            if got:
                 made += 1
+                floor, seed = got[2]
         # 롤링 sigma 가 시간 변동을 잡고 나면 종목별 **수준** 차이가 남는다.
         # (반감기 1분 실측: AMD 1.11 / META 1.38 / MRVL 1.07 - 25% 차이)
         # 짧은 창일수록 EWMA 가 앞선 값이라 실현분산을 과소평가하는데 그 정도가
