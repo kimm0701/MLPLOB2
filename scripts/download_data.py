@@ -17,16 +17,37 @@ import os
 import sys
 import time
 
-# 2026-07-14 ~ 2026-07-31 중 평일 14일. 주말은 미국 본장이 닫혀 있어 제외한다.
+# 2026-07-14 ~ 2026-08-17 중 평일. 주말은 파일은 있지만 미국 본장이 닫혀
+# 이벤트 수가 1/5 수준이라 성질이 달라 섞지 않는다.
 WEEKDAYS = [
     "20260714", "20260715", "20260716", "20260717",
     "20260720", "20260721", "20260722", "20260723", "20260724",
     "20260727", "20260728", "20260729", "20260730", "20260731",
+    "20260803", "20260804", "20260805", "20260806", "20260807",
+    "20260810", "20260811", "20260812", "20260813", "20260814",
+    "20260817",
 ]
 
 # {심볼: {날짜: 드라이브 파일 ID}}
 FILE_IDS = {
     "MRVL": {
+        "20260817": "12J_OxPL5vIwyaBLw0iNrr5uet4MXrlbE",
+        "20260816": "1gTbDrT4XIps2rTGmjv1tkWa9onsd6ziH",
+        "20260815": "1DopTf_rMNYfdwSGfHmvUSCuHZKmJ7ph3",
+        "20260814": "1kpLOoOMJR6iOJUURwUcwMTrLg5NJgDJr",
+        "20260813": "15IRjHlL6FgUi88Bi7cgRbRadWmXSem3O",
+        "20260812": "15v0IPNskxi_-nREO-JgBvFT9093AK6Xc",
+        "20260811": "13rwDPksMY0UaL6vdevnFknFByoFQQUir",
+        "20260810": "1r28KY60X8VFfrap7c6Pt5vG_9YM8KknQ",
+        "20260809": "1DwkFizs7vsKUWsqJyi-98DOaJilyl964",
+        "20260808": "1pd8Wj7ZS4H66S5xHFIJsqBpTE76dvGT7",
+        "20260807": "1-ITehRPR2wsW5advbu49PWykOqcjeSxd",
+        "20260806": "18REIg1TKDKtuf-2SrvuwkYXELd07T3i_",
+        "20260805": "18MSXXWwvWb_44r2QZpd0kNe2L7W5h1H-",
+        "20260804": "1rVbFsErz7dV7e_fy-JHCUyWV87qPH8S6",
+        "20260803": "1iXBaqVK0205O-fheHKTzSpFHrEL1uwCS",
+        "20260802": "17qcLMa8qujmUQJBVIihM4yNW5SsfsOfT",
+        "20260801": "1XKZp6zlis9TySirtdglaH-QQU_NaW1ZV",
         "20260714": "1qYt2nLSVp4azqB8eL7RvOutsl5b8Ecvd",
         "20260715": "1upuLqsPtCV9rvgvoM84w2Cz-49sVYZuq",
         "20260716": "1SfZf-H7fTN6AGsXOtiqpgxOqm62k7-sy",
@@ -43,6 +64,23 @@ FILE_IDS = {
         "20260731": "12EmlowwUx5ixotzCC3cqLsipwKHFu-ab",
     },
     "AMD": {
+        "20260817": "1aynOC1EuSKqqEvKEQBvCH7UMiPGvMN5m",
+        "20260816": "10LWaEVxqXbCQbSnddR7ojf9vtEYtxSDr",
+        "20260815": "1jSQWcx0EnTApY9By-pT29XaoJfo7CUdN",
+        "20260814": "1o4_laTDKBY2M55Ipemzr2YW9V9P1u2SM",
+        "20260813": "14S24gPb1rO6r1mvif0RCToXgXJUMGowo",
+        "20260812": "1FYcqHpeklKYxSbbUFc49UgjL5NymyX01",
+        "20260811": "1ERViS6EKVy6_Csim7SzSyAzng-ajGMw0",
+        "20260810": "1IQhQSlkO0KHYviU2-elQqLN7nrz4JSNM",
+        "20260809": "1lJm8edOF6ljFDclcwN6P19vKoaD92O1v",
+        "20260808": "1QzEvZGpj7PvVoHuVkdGWqg_hUi1v4ncY",
+        "20260807": "1lALip9N10xp0xCzEqRct4c02mqmbWiwm",
+        "20260806": "18XOXe4NjUlNj2wGexs4v2e1nDPm3TLaf",
+        "20260805": "1O8aZB67Sgglanx3Fsw5F1vyMO0tDEsaf",
+        "20260804": "1j_-E2-axL00O2xqcWQSSjmYRRnQKoIoN",
+        "20260803": "17Fut_tnyeAGyXBOOvD1z940FZ4aDJoO0",
+        "20260802": "1rwLEa6wYSTU77GjfGCRmbdHovQmgpFhg",
+        "20260801": "14MjaTtLJg0ta3rrXLTl9NPKe2EMgl7Qk",
         "20260714": "1dJmvoTX3sNi9xcPlEMmI_E3MD7Kq3Yb0",
         "20260715": "1LRhjTsi5zlCW6AwyDhgY2_toRWzGDzO2",
         "20260716": "1Tw0Tv0k11gAMty3OZatNS16S8yIOtRCt",
@@ -59,6 +97,23 @@ FILE_IDS = {
         "20260731": "1Df7UCf39_uxQmenGZbCltkvTGsnQj4e0",
     },
     "META": {
+        "20260817": "1Lbe6ZqwEfFBREN6j_ZdHJTqqiKO89L_b",
+        "20260816": "1TMUfVdmD4RxGKxMG6HL57skQ0QxMKS4R",
+        "20260815": "1In5U48Atn4DGH4DJv-uFykDQ_S_RXdHY",
+        "20260814": "1Qcm1kBH4OK4hn_ardsWW7pXWrfzTVLyv",
+        "20260813": "1O5uNa4VOQekR3LFekUkYgDlnBmXC3_ng",
+        "20260812": "11uZjNRfE7oRy--qaLuClK2CbT6ulAVXb",
+        "20260811": "1ep6m5vZrpnDn73kX6cjNuRcbthZ8nWp_",
+        "20260810": "1heTgwwMGOzXR0uETQOBnWsdbqfvO1p8e",
+        "20260809": "1Al1_WSVthzwMEiUJ_gOf2JITsn--IKeW",
+        "20260808": "1C_o_-7-Z_y2gRZ_RQEViv64G4rv_YNWS",
+        "20260807": "1dxLoprDsgSQBmCsPYX0nUDqXMzrPqrxV",
+        "20260806": "17rVNgk0asbmF5-VyApt_fzdKvW_8vcVi",
+        "20260805": "1zrskQPayeVdVG01kzUc5HQlQNXMv5Mv7",
+        "20260804": "1ZcxHUGW4pGKE6IBuUfV1an4rh_DpcDF-",
+        "20260803": "1fqDz5-qcyXcRCgqbjbFH91Kjj2OakJLr",
+        "20260802": "1-uesnTc2TRWUEW_ye_YC4mL6x3Nya6R9",
+        "20260801": "1ni00zaFljPKPqhhErZu80gPxngwJrsG1",
         "20260714": "1lcYEWDx8Y-Gz-cg9ZxFUJRCVAkWZqGlL",
         "20260715": "1BjhNs4Kxg5kAn8bDatxS1OawsPF7mjJC",
         "20260716": "1wJKEaInH7WZV8FMlIHIE86uyrLqB1bhW",
