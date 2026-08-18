@@ -199,5 +199,24 @@ def test_하한은_전날에서_온다():
     # 첫날은 전날이 없으므로 절대 하한만
     import numpy as np
     sig = np.array([1e-9, 0.5, 2.0])
-    assert mt._apply_floor(sig, None)[0] == 1e-6
+    assert mt._apply_floor(sig, None)[0] == mt.ABS_MIN_SIGMA
     assert np.allclose(mt._apply_floor(sig, 0.3), [0.3, 0.5, 2.0])
+    # 전날 하한이 물리적 하한보다 작아도 물리적 하한이 이긴다
+    assert mt._apply_floor(sig, 1e-9)[0] == mt.ABS_MIN_SIGMA
+    assert mt.ABS_MIN_SIGMA >= 0.001, "너무 작으면 조용한 구간에서 z 가 폭발한다"
+
+
+def test_깨진_호가창_스냅샷을_무효로_본다():
+    """한쪽만 갱신된 스냅샷은 시장 상태가 아니라 캡처 결함이다.
+
+    실측: META 20260714 idx4 에서 매수가 521.76 에 멈춰 있고 매도만 653.19 로
+    들어와 스프레드가 13,143틱이 됐다. 0.02초 뒤 652.19 로 정상화된다.
+    그 한 지점이 |z| 를 7.79e5 까지 밀어 올렸다.
+
+    진짜 넓은 스프레드(p99.99 = 32~36틱)는 걸리면 안 된다 - 그건 학습해야 할
+    시장 상태이고, log_spread_ticks 로 이미 모델에 들어간다.
+    """
+    from scripts.make_targets import MAX_SPREAD_TICKS
+
+    assert MAX_SPREAD_TICKS >= 50, "실제 넓은 스프레드(p99.99 32~36틱)를 자르면 안 된다"
+    assert MAX_SPREAD_TICKS <= 500, "이보다 크면 깨진 스냅샷을 못 거른다"

@@ -56,7 +56,28 @@ EWMA_HALFLIFE_SEC = 300                 # 초. 종목마다 이벤트 수로 환
 # 60s 1.069 / 120s 1.044 / 300s 1.021 / 900s 1.007 / 고정 1.892.
 # 120~900초가 평평하므로 가운데인 300초를 쓴다 - 경계값을 피하고, 짧을수록
 # 구간 변화에 빨리 적응한다.
-MIN_SIGMA_PCT = 5.0                     # sigma 하한 (그날 분포의 하위 %)
+MIN_SIGMA_PCT = 5.0                     # 전날 분포의 하위 % 를 하한으로 쓴다
+# 종목·시점과 무관한 물리적 하한 (틱 단위).
+#
+# 미드가 틱의 1/100 도 안 움직이는 구간의 '변동성' 은 뜻이 없다. 예전 값
+# 1e-6 은 0 나눗셈만 막자는 의도였는데 너무 작아서, 조용한 구간 뒤 첫 움직임
+# 하나가 |z| 를 수십억까지 밀어 올렸다 (실측: 첫날 최대 7.79e9).
+# winsorize 가 학습은 막아 주고 채점은 되돌릴 때 상쇄되지만, 그 표본들이
+# '최대 강도 정답' 으로 학습에 들어가고 분산 통계가 못 쓰게 된다.
+ABS_MIN_SIGMA = 0.01
+# 호가창 유효성 상한 (틱). 이보다 벌어진 스냅샷은 시장 상태가 아니라 캡처 결함으로 본다.
+#
+# 실측(최근 6일): 진짜 넓은 스프레드는 p99.99 기준 32~36틱이다. 그런데 캡처
+# 시작 직후 한쪽만 갱신된 스냅샷에서 13,143틱(META 20260714 idx4)이 나왔다 -
+# 매수는 521.76 에 멈춰 있고 매도만 653.19 로 들어온 상태였다. 0.02초 뒤
+# 652.19 로 정상화된다.
+#
+# 100틱은 p99.99 의 약 3배 밖이라 걸리는 비율이 0.0002~0.0004% 다. 다만
+# 100~326틱 구간이 전부 결함인지는 개별 확인하지 않았다.
+#
+# **실전에도 같은 규칙을 건다.** 스프레드가 이만큼 벌어지면 데이터가 깨진
+# 것이므로 예측을 멈추고 호가를 내지 않는다. 학습에서만 빼는 조작이 아니다.
+MAX_SPREAD_TICKS = 100.0
 WINSOR_PCT = 0.5                        # 학습 정답을 자를 상하위 % (논문과 동일)
 
 
@@ -127,9 +148,9 @@ def _apply_floor(sig: np.ndarray, floor: float | None) -> np.ndarray:
          3,400~5,200 이라 **버리지 않았다**. 하루 표본의 0.55% 가 미래로 만든
          하한을 쓰고 있었다.
     """
-    f = 1e-6
+    f = ABS_MIN_SIGMA
     if floor is not None and np.isfinite(floor):
-        f = max(float(floor), 1e-6)
+        f = max(float(floor), ABS_MIN_SIGMA)
     return np.maximum(sig, f)
 
 
@@ -208,7 +229,13 @@ def build_day(cache: str, symbol: str, date: str, tick: float,
     n = mid.size
     # 미드에 구멍이 있으면 앞의 값으로 메운다. 안 그러면 EWMA 가 그 뒤로 전부
     # NaN 이 된다 (실측: AMD 하루치가 통째로 NaN 이 됐다).
+    # 호가창이 물리적으로 성립하지 않는 시점을 무효로 본다.
+    #   - 미드가 NaN (한쪽 호가가 없음)
+    #   - 스프레드가 MAX_SPREAD_TICKS 초과 (한쪽만 갱신된 스냅샷)
     bad = ~np.isfinite(mid)
+    if px.shape[1] >= 3:
+        sp = (px[:, 2] - px[:, 1]) / tick
+        bad |= ~np.isfinite(sp) | (sp <= 0) | (sp > MAX_SPREAD_TICKS)
     if bad.any():
         idx = np.maximum.accumulate(np.where(~bad, np.arange(n), 0))
         mid = mid[idx]
