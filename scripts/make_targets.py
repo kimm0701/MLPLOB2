@@ -78,6 +78,31 @@ ABS_MIN_SIGMA = 0.01
 # **실전에도 같은 규칙을 건다.** 스프레드가 이만큼 벌어지면 데이터가 깨진
 # 것이므로 예측을 멈추고 호가를 내지 않는다. 학습에서만 빼는 조작이 아니다.
 MAX_SPREAD_TICKS = 100.0
+
+# ---- 일중 주기 계수 -------------------------------------------------------
+#
+# 변동성은 하루 안에서 예측 가능한 모양을 그린다. 실측(1분 해상도, 학습 17일):
+# 미국 개장 13:30 UTC 에 하루 평균의 6~10배로 뛰고 30분에 걸쳐 내려온다.
+# 최저(21:00 무렵 0.15배)와 비교하면 40~55배 차이다.
+#
+# EWMA 는 이걸 못 따라간다. 반감기가 개장 기준 약 27초라 6배 점프를 90% 따라
+# 잡는 데 90초가 걸리는데, 급첨 자체가 1분 만에 끝난다. 정점을 지나서야 반영된다.
+#
+# 그래서 두 층으로 나눈다 (Andersen & Bollerslev 1997, Engle & Sokalska 2012).
+#
+#     sigma(t) = c(t) x EWMA(r/c)
+#
+#     c(t)  모양. 달력에서 온다. 예측이 아니라 시계를 보는 것
+#     EWMA  높이. 오늘 이 종목이 평소보다 센지 약한지
+#
+# **표는 과거 날짜에서만 만든다.** 워크포워드 검증 결과(로그 RMSE):
+#     개장 13:30~14:30   계수없음 1.040 -> 과거10일 0.244   76% 감소
+#     하루 전체          계수없음 0.724 -> 과거10일 0.544   25% 감소
+# 과거 10일이면 포화라(17일과 0.0006 차이) 창을 15일로 둔다.
+DIURNAL_BINS = 1440             # 1분 해상도. 시간 단위로 뭉개면 급첨이 사라진다
+DIURNAL_WINDOW = 15             # 롤링 창 (거래일)
+DIURNAL_MIN_DAYS = 3            # 이보다 적으면 계수를 쓰지 않는다 (c=1)
+DIURNAL_MIN_COUNT = 100         # 한 칸에 이만큼은 있어야 값을 믿는다
 WINSOR_PCT = 0.5                        # 학습 정답을 자를 상하위 % (논문과 동일)
 
 
@@ -169,8 +194,49 @@ def targets_by_seconds(mid, ts_ms, tick, horizons_sec):
     return y
 
 
+def back_returns(mid, ts_ms, tick, base_sec):
+    """각 시점에서 **직전 base_sec 초** 동안의 움직임(틱). 미래를 보지 않는다."""
+    n = mid.size
+    back = np.searchsorted(ts_ms, ts_ms - base_sec * 1000.0, side="left")
+    r = np.zeros(n, dtype=np.float64)
+    good = back < np.arange(n)
+    d = (mid - mid[np.minimum(back, n - 1)]) / tick
+    r[good] = np.where(np.isfinite(d[good]), d[good], 0.0)
+    return r
+
+
+def _slots(ts_ms, nb=DIURNAL_BINS):
+    return (((ts_ms.astype(np.int64) // 1000) % 86400) // (86400 // nb)).astype(int)
+
+
+def day_profile(r, ts_ms, nb=DIURNAL_BINS):
+    """하루의 1분 칸별 변동성을 그날 평균으로 나눈 것. 계수표의 재료."""
+    sl = _slots(ts_ms, nb)
+    ok = np.isfinite(r)
+    s2 = np.bincount(sl[ok], weights=r[ok] ** 2, minlength=nb)
+    c = np.bincount(sl[ok], minlength=nb)
+    v = np.sqrt(np.divide(s2, np.maximum(c, 1)))
+    v[c < DIURNAL_MIN_COUNT] = np.nan
+    m = np.nanmean(v)
+    return v / m if np.isfinite(m) and m > 0 else np.full(nb, np.nan)
+
+
+def diurnal_coef(past, ts_ms):
+    """과거 프로파일들의 중앙값 -> 이벤트별 계수.
+
+    과거가 부족하면 1 을 돌려준다 - 계수를 안 쓰는 것과 같다. 학습 구간
+    맨 앞 며칠이 여기 해당하고, 워크포워드 측정상 손해는 작다.
+    """
+    n = ts_ms.size
+    if len(past) < DIURNAL_MIN_DAYS:
+        return np.ones(n)
+    tab = np.nanmedian(np.asarray(past[-DIURNAL_WINDOW:]), axis=0)
+    tab = np.where(np.isfinite(tab) & (tab > 0), tab, 1.0)
+    return tab[_slots(ts_ms)]
+
+
 def causal_sigma_sec(mid, ts_ms, tick, base_sec, halflife,
-                     floor=None, seed=None):
+                     floor=None, seed=None, coef=None, return_state=False):
     """**base_sec 초 구간** 움직임의 인과적 EWMA 표준편차.
 
     정답의 기준 horizon 과 같은 구간으로 재야 단위가 맞는다. 시점 t 의 값은
@@ -181,11 +247,12 @@ def causal_sigma_sec(mid, ts_ms, tick, base_sec, halflife,
     보지 않는다. 실시간 시스템이 장 시작 때 어제 상태를 이어받는 것과 같다.
     """
     n = mid.size
-    back = np.searchsorted(ts_ms, ts_ms - base_sec * 1000.0, side="left")
-    r = np.zeros(n, dtype=np.float64)
-    good = back < np.arange(n)
-    d = (mid - mid[np.minimum(back, n - 1)]) / tick
-    r[good] = np.where(np.isfinite(d[good]), d[good], 0.0)
+    r = back_returns(mid, ts_ms, tick, base_sec)
+
+    # 계수로 나눠 주기를 걷어낸 뒤 EWMA 를 돌린다. 남는 것은 '평소 그 시간대
+    # 대비 얼마나 센가' 라서, 개장이든 새벽이든 같은 척도가 된다.
+    c = np.ones(n) if coef is None else np.where(np.isfinite(coef) & (coef > 0), coef, 1.0)
+    r = r / c
 
     alpha = 1.0 - 0.5 ** (1.0 / max(halflife, 1))
     warm = min(halflife, n)
@@ -210,12 +277,16 @@ def causal_sigma_sec(mid, ts_ms, tick, base_sec, halflife,
         else:
             acc += alpha * (r2 - acc)
         var[i] = acc
-    sig = np.sqrt(np.maximum(var, 1e-12))
-    return _apply_floor(sig, floor)
+    sig_t = np.sqrt(np.maximum(var, 1e-12))     # 주기를 걷어낸 '높이'
+    sig = _apply_floor(c * sig_t, floor)        # 다시 곱해 실제 변동성으로
+    if return_state:
+        return sig, (float(var[-1]) if var.size else None)
+    return sig
 
 
 def build_day(cache: str, symbol: str, date: str, tick: float,
-              horizons_buckets, halflife_sec: float, floor=None, seed=None):
+              horizons_buckets, halflife_sec: float, floor=None, seed=None,
+              past_profiles=None):
     """하루치 정답(틱)과 sigma 를 만들어 저장한다.
 
     sigma 는 1Δt 기준 하나만 저장한다. horizon j 의 크기는 읽을 때
@@ -262,11 +333,18 @@ def build_day(cache: str, symbol: str, date: str, tick: float,
         y[(c[k + 1] - c[lo]) > 0] = np.nan
 
     # sigma 도 가장 짧은 horizon 과 같은 구간으로 잰다
-    raw = causal_sigma_sec(mid, ts, tick, spec.TARGET_HORIZONS_SEC[0],
-                           halflife, floor=None, seed=seed)
+    # 계수는 **과거 날짜에서만** 만든 표를 쓴다. 이 날짜의 데이터는 안 들어간다.
+    base_r = back_returns(mid, ts, tick, spec.TARGET_HORIZONS_SEC[0])
+    coef = diurnal_coef(past_profiles or [], ts)
+    raw, var_t = causal_sigma_sec(mid, ts, tick, spec.TARGET_HORIZONS_SEC[0],
+                                  halflife, floor=None, seed=seed, coef=coef,
+                                  return_state=True)
     sig = _apply_floor(raw, floor).astype(np.float32)
-    # 다음 날에 넘길 상태: 하한은 하한 씌우기 전 분포에서, 초기값은 마지막 분산.
-    nxt = (day_floor(raw), float(raw[-1] ** 2) if raw.size else None)
+    # 다음 날에 넘길 상태
+    #   하한   하한 씌우기 전 sigma 분포에서
+    #   초기값 **주기를 걷어낸** 분산. 계수를 곱한 값을 넘기면 자정 계수가 두 번 곱해진다
+    #   표     이 날짜의 프로파일. 다음 날 표에 들어간다
+    nxt = (day_floor(raw), var_t, day_profile(base_r, ts))
 
     np.save(base + "_yt.npy", y)          # [K, 3]  틱 단위, 정규화 전
     np.save(base + "_sg.npy", sig)        # [K]     1Δt 인과적 sigma
@@ -309,12 +387,18 @@ def main() -> int:
         # 하한은 **전날** 것을 쓴다. 그래서 날짜 순서대로 돌면서 이어 넘긴다.
         # targets 는 학습->검증(->시험) 순이라 이미 시간순이다.
         floor = seed = None
+        past = []          # 지난 날들의 1분 프로파일. 다음 날 계수표의 재료
         for date in targets:
             got = build_day(args.cache, sym, date, tick, hb,
-                            args.halflife_sec, floor=floor, seed=seed)
+                            args.halflife_sec, floor=floor, seed=seed,
+                            past_profiles=past)
             if got:
                 made += 1
-                floor, seed = got[2]
+                floor, seed, prof = got[2]
+                if np.isfinite(prof).any():
+                    past.append(prof)
+        print(f"   일중 계수: 창 {DIURNAL_WINDOW}일, 최소 {DIURNAL_MIN_DAYS}일, "
+              f"{DIURNAL_BINS}칸  (앞 {DIURNAL_MIN_DAYS}일은 계수 1)")
         # 롤링 sigma 가 시간 변동을 잡고 나면 종목별 **수준** 차이가 남는다.
         # (반감기 1분 실측: AMD 1.11 / META 1.38 / MRVL 1.07 - 25% 차이)
         # 짧은 창일수록 EWMA 가 앞선 값이라 실현분산을 과소평가하는데 그 정도가

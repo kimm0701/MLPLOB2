@@ -220,3 +220,42 @@ def test_깨진_호가창_스냅샷을_무효로_본다():
 
     assert MAX_SPREAD_TICKS >= 50, "실제 넓은 스프레드(p99.99 32~36틱)를 자르면 안 된다"
     assert MAX_SPREAD_TICKS <= 500, "이보다 크면 깨진 스냅샷을 못 거른다"
+
+
+def test_일중계수는_과거_날짜에서만_온다():
+    """계수표에 그날 데이터가 들어가면 정답이 미래를 본다.
+
+    실측(1분 해상도, 학습 17일): 개장 13:30 UTC 가 하루 평균의 6~10배다.
+    EWMA 반감기가 개장 기준 27초라 6배 점프를 따라잡는 데 90초가 걸리는데
+    급첨은 1분 만에 끝난다. 그래서 계수로 미리 반영한다 - 다만 그 계수는
+    반드시 지난 날들에서만 나와야 한다.
+    """
+    import numpy as np
+
+    from scripts.make_targets import (DIURNAL_MIN_DAYS, back_returns,
+                                      causal_sigma_sec, day_profile,
+                                      diurnal_coef)
+
+    rng = np.random.default_rng(3)
+    n = 20000
+    ts = np.cumsum(rng.integers(20, 120, n)).astype(float)
+    mid = 100 + np.cumsum(rng.normal(0, 0.01, n))
+
+    # 과거가 부족하면 계수를 쓰지 않는다
+    prof = day_profile(back_returns(mid, ts, 0.01, 0.5), ts)
+    assert np.allclose(diurnal_coef([prof] * (DIURNAL_MIN_DAYS - 1), ts), 1.0)
+    assert not np.allclose(diurnal_coef([prof] * DIURNAL_MIN_DAYS, ts), 1.0)
+
+    # 계수를 써도 인과성이 깨지지 않는다
+    coef = diurnal_coef([prof] * 5, ts)
+    base = causal_sigma_sec(mid, ts, 0.01, 0.5, 1500, floor=0.5, coef=coef)
+    for cut in (200, 1000, 3000, 8000):
+        m2 = mid.copy()
+        m2[cut:] += np.cumsum(rng.normal(0, 0.5, n - cut))
+        s2 = causal_sigma_sec(m2, ts, 0.01, 0.5, 1500, floor=0.5, coef=coef)
+        assert np.allclose(base[:cut], s2[:cut]), f"{cut} 이후가 그 앞에 영향"
+
+    # 계수가 클수록 sigma 가 크다 (모양이 반영된다)
+    c2 = np.where(np.arange(n) > n // 2, 4.0, 1.0)
+    s = causal_sigma_sec(mid, ts, 0.01, 0.5, 1500, floor=1e-6, coef=c2)
+    assert np.median(s[n // 2 + 2000:]) > 2 * np.median(s[:n // 2])
