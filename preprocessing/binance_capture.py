@@ -87,6 +87,48 @@ def iter_depth_events(tar_paths, time_field: str = "T"):
             yield int(ts), bids, asks
 
 
+def iter_trades(tar_paths, time_field: str = "T"):
+    """(ts_ms, price, qty, signed_qty) 를 흘려준다.
+
+    signed_qty 의 부호는 **누가 공격했는가** 다.
+        m=False  매수자가 테이커  ->  매수 공격  ->  +qty
+        m=True   매수자가 메이커  ->  매도 공격  ->  -qty
+
+    왜 필요한가
+    -----------
+    지금 입력 22개는 호가창 **변화량**만 본다. 잔량이 줄어든 것이 체결 때문인지
+    취소 때문인지 구분하지 못한다.
+
+        매도 1호가 100 -> 60
+            체결로 40 소진    강한 매수 압력
+            취소로 40 감소    매도 의사 철회
+
+    정반대 신호인데 지금은 같게 보인다. 실측(AMD 5분): 호가창 버킷의 88% 에는
+    체결이 없어서, 체결 유무 자체가 새로운 정보다.
+    """
+    if isinstance(tar_paths, (str, os.PathLike)):
+        tar_paths = [tar_paths]
+
+    for path in tar_paths:
+        for _, payload in iter_raw_lines(path):
+            if _TRADE_MARK not in payload:
+                continue
+            try:
+                d = json.loads(payload)["data"]
+            except (ValueError, KeyError, TypeError):
+                continue
+            ts = d.get(time_field, d.get("E"))
+            if ts is None:
+                continue
+            try:
+                qty = float(d["q"])
+                price = float(d["p"])
+            except (KeyError, ValueError, TypeError):
+                continue
+            sign = -1.0 if d.get("m") else 1.0
+            yield int(ts), price, qty, sign * qty
+
+
 def iter_book_ticker(tar_paths, time_field: str = "T"):
     """(ts_ms, best_bid, bid_qty, best_ask, ask_qty). 복원 검증용."""
     if isinstance(tar_paths, (str, os.PathLike)):

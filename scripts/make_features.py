@@ -1,4 +1,4 @@
-"""기존 22개 특징에 호가창 상태 2개를 덧붙여 24개로 만든다.
+"""기존 22개 특징에 호가창 상태 2개 + 체결 3개를 덧붙여 27개로 만든다.
 
     python scripts/make_features.py
 
@@ -37,9 +37,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import ofi_spec as spec                                    # noqa: E402
 from preprocessing.ofi_dataset import split_dates          # noqa: E402
 from scripts.download_data import FILE_IDS, WEEKDAYS       # noqa: E402
+from preprocessing.binance_capture import iter_trades      # noqa: E402
+from preprocessing.trade_features import trade_features    # noqa: E402
 from scripts.make_targets import infer_tick                # noqa: E402
 
-EXTRA_NAMES = ["log_spread_ticks", "log_secs_since_move"]
+EXTRA_NAMES = ["log_spread_ticks", "log_secs_since_move",
+               "trade_flow_10", "trade_flow_20", "log_trade_intensity"]
 MAX_GAP_SEC = 60.0          # 이벤트 간격 상한 (거래 공백 구간 방어)
 
 
@@ -72,17 +75,36 @@ def secs_since_move(mid: np.ndarray) -> np.ndarray:
     return np.log10(gap).astype(np.float32)
 
 
-def build_day(cache: str, symbol: str, date: str, tick: float):
+def build_day(cache: str, symbol: str, date: str, tick: float, raw_root: str):
+    """22 + 상태 2 + 체결 3 = 27 열.
+
+    체결은 원본 tar 를 다시 읽어야 한다. 무거운 호가창 복원은 다시 하지 않고
+    @trade 줄만 훑으므로 전처리 전체를 다시 도는 것보다 훨씬 싸다.
+    체결이 없거나 원본이 없으면 그 세 열은 0 으로 둔다.
+    """
     base = os.path.join(cache, symbol, date)
-    if not (os.path.exists(base + "_x.npy") and os.path.exists(base + "_px.npy")):
+    need = ["_x.npy", "_px.npy", "_ts.npy"]
+    if not all(os.path.exists(base + e) for e in need):
         return None
     x = np.load(base + "_x.npy", mmap_mode="r")
     px = np.asarray(np.load(base + "_px.npy", mmap_mode="r"), dtype=np.float64)
-    n = min(x.shape[0], px.shape[0])
+    ts = np.asarray(np.load(base + "_ts.npy"), dtype=np.int64)
+    n = min(x.shape[0], px.shape[0], ts.size)
+    px, ts = px[:n], ts[:n]
 
-    extra = np.stack([spread_ticks(px[:n], tick),
-                      secs_since_move(px[:n, 0])], axis=1)
+    tar = os.path.join(raw_root, symbol, f"{symbol}USDT_{date}.tar")
+    if os.path.exists(tar):
+        rows = [(t, sq) for t, _, _, sq in iter_trades(tar)]
+        T = np.asarray(rows, dtype=np.float64) if rows else np.zeros((0, 2))
+        tf = trade_features(ts, T[:, 0], T[:, 1])
+    else:
+        tf = np.zeros((n, 3), dtype=np.float32)
+
+    extra = np.concatenate(
+        [np.stack([spread_ticks(px, tick), secs_since_move(px[:, 0])], axis=1),
+         tf[:n]], axis=1)
     out = np.concatenate([np.asarray(x[:n], dtype=np.float32), extra], axis=1)
+    assert out.shape[1] == spec.INPUT_DIM, (out.shape, spec.INPUT_DIM)
     np.save(base + "_x2.npy", out)
     return out
 
@@ -90,6 +112,8 @@ def build_day(cache: str, symbol: str, date: str, tick: float):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache", default="data/processed")
+    ap.add_argument("--raw", default="data/raw",
+                    help="체결을 읽을 원본 tar 위치")
     ap.add_argument("--symbols", nargs="*", default=sorted(FILE_IDS))
     ap.add_argument("--dates", nargs="*", default=WEEKDAYS)
     ap.add_argument("--n-val", type=int, default=spec.N_VAL)
@@ -109,7 +133,7 @@ def main() -> int:
             continue
         made, samples = 0, None
         for date in args.dates:
-            out = build_day(args.cache, sym, date, tick)
+            out = build_day(args.cache, sym, date, tick, args.raw)
             if out is not None:
                 made += 1
                 if samples is None:

@@ -32,7 +32,7 @@ OFI_WINDOWS = [10, 20]          # 최근 0.5초 / 1초
 # 0.5 초가 0.0562 로 3.0 초(0.0218) 의 2.6 배다. 0.5~2.0 초 4 개로 줄이면
 # 1 초 이하가 30.7% 를 받는다.
 TARGET_HORIZONS_SEC = [0.5, 1.0, 1.5, 2.0]
-INPUT_DIM = 24                  # 주문흐름 22 + 호가창 상태 2
+INPUT_DIM = 27                  # 주문흐름 22 + 호가창 상태 2 + 체결 3
 OUTPUT_DIM = 4                  # horizon 별 signed mid-price 변화 (틱)
 EPS = 1e-8
 LOSS_TYPE = "mse"               # "mse" | "huber"
@@ -55,8 +55,11 @@ FEATURE_NAMES = (
     + [f"ask_of_l{i}" for i in range(1, LEVELS + 1)]
     + ["ofi_500ms", "ofi_1000ms"]
     + ["log_spread_ticks", "log_secs_since_move"]
+    + ["trade_flow_10", "trade_flow_20", "log_trade_intensity"]
 )
-STATE_FEATURES = 2              # 뒤에서 이만큼은 종목별 정규화에서 제외한다
+STATE_FEATURES = 5              # 뒤에서 이만큼은 종목별 정규화에서 제외한다
+# 상태·체결 변수는 **이 순서대로** 쌓는다. 절제 실험이 앞에서부터 잘라 쓰므로
+# 순서를 바꾸면 --n-input 22/24/27 의 의미가 달라진다.
 # 전처리 엔진(ofi_features.py)이 만드는 열 수. 상태 변수 2개는 그 뒤에
 # scripts/make_features.py 가 _px.npy 에서 계산해 덧붙인다.
 OF_DIM = INPUT_DIM - STATE_FEATURES
