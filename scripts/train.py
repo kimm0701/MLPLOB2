@@ -64,6 +64,11 @@ def build_args():
     ap.add_argument("--n-val", type=int, default=spec.N_VAL)
     ap.add_argument("--n-test", type=int, default=spec.N_TEST)
 
+    ap.add_argument("--horizon-weights", default="equal",
+                    choices=sorted(spec.HORIZON_WEIGHTS),
+                    help="horizon 별 손실 가중. equal 은 먼 쪽이 40%% 를 가져간다. "
+                         "invvar 는 논문 방식(horizon 별 z-score)과 동등. "
+                         "short 는 0.5초 단독 학습")
     ap.add_argument("--objective", default="val_loss",
                     choices=["val_loss", "val_r2", "val_r2_short"],
                     help="조기종료·체크포인트 기준. val_loss 는 4개 horizon "
@@ -200,6 +205,7 @@ def main() -> int:
     ckpt_dir = args.ckpt_dir or os.path.join(
         cst.DIR_SAVED_MODEL, "MLPLOB_OFI",
         f"{args.arch}_h{args.hidden_dim}_l{args.num_layers}_lr{args.lr}_{args.loss}"
+        + (f"_{args.horizon_weights}" if args.horizon_weights != "equal" else "")
         + (f"_no{args.held_out}" if args.held_out else ""))
 
     engine = RegressionEngine(
@@ -217,6 +223,8 @@ def main() -> int:
                               if args.normalize_target else None),
         # 롤링 경로에서는 배율이 배치에 실려 오므로 종목 상수를 두지 않는다
         target_normalized=not args.no_rolling,
+        horizon_weights=(None if args.horizon_weights == "equal"
+                         else spec.HORIZON_WEIGHTS[args.horizon_weights]),
     )
 
     trainer = Trainer(

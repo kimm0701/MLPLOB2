@@ -268,3 +268,41 @@ def test_일중계수는_과거_날짜에서만_온다():
     settled = np.median(s[-2000:])
     assert right_after > 3 * before, "계수가 뛰었는데 sigma 가 즉시 안 뛴다"
     assert settled < 0.6 * right_after, "정상 상태로 안 돌아온다 (상쇄가 안 됨)"
+
+
+def test_horizon_가중이_손실_비중을_바꾼다():
+    """4개를 같은 sigma 로 나누므로 먼 horizon 이 손실의 40% 를 가져간다.
+
+    실측(학습 정답, winsorize 후): 9.7% / 19.8% / 30.1% / 40.4%.
+    Kolm et al. §3.2.2 는 horizon 마다 z-score 를 씌워 이 불균형을 없앤다.
+    1/분산 가중은 그것과 수학적으로 같다.
+    """
+    import torch
+
+    from models.regression_engine import RegressionEngine
+
+    c = cfg()
+    w = spec.HORIZON_WEIGHTS["invvar"]
+    assert len(w) == spec.OUTPUT_DIM
+    assert abs(sum(w) - spec.OUTPUT_DIM) < 0.1, "평균 1 이어야 기울기 크기가 보존된다"
+    assert w[0] > w[-1] * 3, "짧은 horizon 이 더 큰 가중을 받아야 균등해진다"
+
+    torch.manual_seed(0)
+    p = torch.zeros(256, spec.OUTPUT_DIM)
+    t = torch.randn(256, spec.OUTPUT_DIM)
+    t[:, 3] *= 4.0                       # 먼 horizon 정답이 크다
+
+    plain = RegressionEngine(model=build_model(c), model_config=c,
+                             target_normalized=True).loss(p, t).item()
+    short = RegressionEngine(model=build_model(c), model_config=c,
+                             target_normalized=True,
+                             horizon_weights=spec.HORIZON_WEIGHTS["short"]
+                             ).loss(p, t).item()
+    # short 는 0.5초만 본다. 먼 horizon 이 아무리 커도 손실에 안 들어간다
+    assert short < plain, "0.5초 단독이면 큰 정답이 손실에서 빠져야 한다"
+
+    t2 = t.clone(); t2[:, 3] *= 10.0     # 먼 horizon 만 더 키운다
+    assert abs(short - RegressionEngine(
+        model=build_model(c), model_config=c, target_normalized=True,
+        horizon_weights=spec.HORIZON_WEIGHTS["short"]).loss(p, t2).item()) < 1e-5, \
+        "short 가중인데 2.0초 정답이 손실을 바꾸면 안 된다"

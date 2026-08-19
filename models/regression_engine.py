@@ -71,7 +71,8 @@ def load_model_from_checkpoint(path: str, map_location="cpu"):
     return model.eval(), hp
 
 
-def build_loss(loss_type: str, huber_beta: float = 1.0) -> nn.Module:
+def build_loss(loss_type: str, huber_beta: float = 1.0,
+               reduction: str = "mean") -> nn.Module:
     """사양 §16. 기본 mse, huber 선택 가능.
 
     huber_beta 는 "어디까지를 신호로 보고 어디부터를 잡음으로 볼지"의 경계다.
@@ -84,9 +85,9 @@ def build_loss(loss_type: str, huber_beta: float = 1.0) -> nn.Module:
     """
     key = (loss_type or spec.LOSS_TYPE).lower()
     if key == "mse":
-        return nn.MSELoss()
+        return nn.MSELoss(reduction=reduction)
     if key in ("huber", "smoothl1"):
-        return nn.SmoothL1Loss(beta=float(huber_beta))
+        return nn.SmoothL1Loss(beta=float(huber_beta), reduction=reduction)
     raise ValueError(f"모르는 손실함수: {loss_type!r}. 'mse' 또는 'huber'")
 
 
@@ -114,6 +115,7 @@ class RegressionEngine(LightningModule):
         huber_beta: float = 1.0,
         target_scale_by_name: dict | None = None,
         target_normalized: bool = False,
+        horizon_weights=None,
     ):
         super().__init__()
         self.model = model
@@ -147,7 +149,14 @@ class RegressionEngine(LightningModule):
         self.target_normalized = bool(target_normalized or self.target_scale_by_name)
         self.loss_scale = 1.0 if self.target_normalized else TARGET_SCALE
 
-        self.criterion = build_loss(loss_type, huber_beta)
+        # horizon 별 가중치. None 이면 기존대로 단순 평균.
+        # 가중치를 쓰면 원소별 손실이 필요하므로 reduction 을 끈다.
+        self.horizon_weights = (None if horizon_weights is None
+                                else torch.tensor(list(horizon_weights),
+                                                  dtype=torch.float32))
+        self.criterion = build_loss(
+            loss_type, huber_beta,
+            reduction="none" if self.horizon_weights is not None else "mean")
         self.save_hyperparameters(ignore=["model"])
 
         self._train_losses: list[float] = []
@@ -168,7 +177,11 @@ class RegressionEngine(LightningModule):
         추가 배율이 필요 없다. 끄면 정답이 소수 수익률(2e-4 규모)이라 그대로
         두면 MSE 가 1e-8 이 되어 Adam 의 eps 에 눌린다. 그때만 bp 로 올린다.
         """
-        return self.criterion(pred, target * self.loss_scale)
+        t = target * self.loss_scale
+        if self.horizon_weights is None:
+            return self.criterion(pred, t)
+        w = self.horizon_weights.to(pred.device)
+        return (self.criterion(pred, t) * w).mean()
 
     # ------------------------------------------------------------------
     @staticmethod

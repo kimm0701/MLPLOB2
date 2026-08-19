@@ -73,5 +73,28 @@ OF_FEATURE_NAMES = FEATURE_NAMES[:OF_DIM]
 N_VAL = 4
 N_TEST = 4
 
+# horizon 별 손실 가중치.
+#
+# 4개 horizon 을 **같은 sigma** 로 나누므로 먼 쪽 정답이 그만큼 크다. 실측한
+# 손실 기여도(학습 정답, winsorize 후):
+#     0.5초 9.7%   1.0초 19.8%   1.5초 30.1%   2.0초 40.4%
+# 우리가 채점하는 0.5초가 노력의 10% 만 받고 있었다.
+#
+# Kolm et al. (2023) §3.2.2 는 "winsorize all dependent variables ... then
+# perform Z-score normalization" 이라고 명시한다 - horizon 마다 따로 표준화해서
+# 균등하게 만든다. 우리는 그 단계를 빼서 불균형이 생겼다.
+#
+# horizon 별 z-score 와 1/분산 가중은 수학적으로 같다.
+#     표준화 후 MSE = sum (예측-정답)^2 / 분산_h = 가중 MSE
+# 그리고 이건 "4개 horizon 평균 R2 최대화" 와도 같은 식이다.
+#
+# 실측 분산비가 1 : 2.04 : 3.10 : 4.16 으로 horizon 에 거의 정비례한다
+# (무작위 걷기의 성질). 평균이 1 이 되도록 맞춰 기울기 크기를 보존한다.
+HORIZON_WEIGHTS = {
+    "equal": [1.0, 1.0, 1.0, 1.0],                  # 지금. 먼 쪽이 40%
+    "invvar": [1.949, 0.955, 0.628, 0.468],         # 논문 방식. 네 개 25% 씩
+    "short": [4.0, 0.0, 0.0, 0.0],                  # 0.5초 단독 = 단일 horizon
+}
+
 assert len(FEATURE_NAMES) == INPUT_DIM
 assert len(TARGET_HORIZONS_SEC) == OUTPUT_DIM
